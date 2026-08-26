@@ -1,0 +1,126 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    name: Pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run pre-commit
+        run: pipx run --spec pre-commit==4.6.1 pre-commit run --all-files --show-diff-on-failure
+
+  build:
+    name: Build (${{ matrix.preset }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: win-x64-vs2022
+            runner: windows-2022
+          - preset: win-arm64-vs2022
+            runner: windows-11-arm
+          - preset: mac-arm64-xcode
+            runner: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build Debug
+        run: cmake --build --preset ${{ matrix.preset }}-debug
+      - name: Test Debug
+        run: ctest --preset ${{ matrix.preset }}-debug -R "^UnitTest"
+      - name: Build Release
+        run: cmake --build --preset ${{ matrix.preset }}-release
+      - name: Test Release
+        run: ctest --preset ${{ matrix.preset }}-release -R "^UnitTest"
+
+  examples:
+    name: Examples (${{ matrix.platform_name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg
+      LIBMLVC_SOURCE_PATH: ${{ github.workspace }}
+      VCPKG_KEEP_ENV_VARS: LIBMLVC_SOURCE_PATH
+      VCPKG_BINARY_SOURCES: clear
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win-x64
+            platform_name: win-x64-vs2022
+            runner: windows-2022
+          - platform: win-arm64
+            platform_name: win-arm64-vs2022
+            runner: windows-11-arm
+          - platform: mac-arm64
+            platform_name: mac-arm64-xcode
+            runner: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure static FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --preset ${{ matrix.platform }}-static -DFETCHCONTENT_SOURCE_DIR_LIBMLVC="${{ github.workspace }}"
+      - name: Build static FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --build --preset ${{ matrix.platform }}-static-release
+      - name: Configure shared FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --preset ${{ matrix.platform }}-shared -DFETCHCONTENT_SOURCE_DIR_LIBMLVC="${{ github.workspace }}"
+      - name: Build shared FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --build --preset ${{ matrix.platform }}-shared-release
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: 8128322a87623426aea726c44ea45ee7e77daaa8
+          path: .vcpkg
+          persist-credentials: false
+      - name: Configure static vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --preset ${{ matrix.platform }}-static
+      - name: Build static vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --build --preset ${{ matrix.platform }}-static-release
+      - name: Configure shared vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --preset ${{ matrix.platform }}-shared
+      - name: Build shared vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --build --preset ${{ matrix.platform }}-shared-release

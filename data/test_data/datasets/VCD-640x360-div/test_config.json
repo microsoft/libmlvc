@@ -1,0 +1,15 @@
+{
+    "test_classes": {
+        "s1": {
+            "base_path": "../../clips",
+            "src_type": "nv12",
+            "sequences": {
+                "VCD_s1_6587ae_640x360_30fps.nv12.gz": {
+                    "width": 640,
+                    "height": 360,
+                    "frames": 300
+                }
+            }
+        }
+    }
+}

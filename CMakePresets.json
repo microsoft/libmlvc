@@ -1,0 +1,345 @@
+{
+    "version": 4,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 30,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "installDir": "${sourceDir}/install/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/VcpkgToolchain.cmake",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "LIBMLVC_BUILD_TOOLS": "ON",
+                "LIBMLVC_BUILD_TESTS": "ON"
+            }
+        },
+        {
+            "name": "win-x64-base",
+            "hidden": true,
+            "inherits": "base",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
+            }
+        },
+        {
+            "name": "win-x64-vs2022",
+            "inherits": "win-x64-base",
+            "displayName": "Windows x64 (VS 2022)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64"
+        },
+        {
+            "name": "win-x64-vs2026",
+            "inherits": "win-x64-base",
+            "displayName": "Windows x64 (VS 2026)",
+            "generator": "Visual Studio 18 2026",
+            "architecture": "x64"
+        },
+        {
+            "name": "win-x64-ninja-debug",
+            "inherits": "win-x64-base",
+            "displayName": "Windows x64 Debug (Ninja)",
+            "generator": "Ninja",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "win-x64-ninja-release",
+            "inherits": "win-x64-base",
+            "displayName": "Windows x64 Release (Ninja)",
+            "generator": "Ninja",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "win-arm64-base",
+            "hidden": true,
+            "inherits": "base",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-windows-static-md"
+            }
+        },
+        {
+            "name": "win-arm64-vs2022",
+            "inherits": "win-arm64-base",
+            "displayName": "Windows ARM64 (VS 2022)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "ARM64"
+        },
+        {
+            "name": "win-arm64-vs2026",
+            "inherits": "win-arm64-base",
+            "displayName": "Windows ARM64 (VS 2026)",
+            "generator": "Visual Studio 18 2026",
+            "architecture": "ARM64"
+        },
+        {
+            "name": "win-arm64-ninja-debug",
+            "inherits": "win-arm64-base",
+            "displayName": "Windows ARM64 Debug (Ninja)",
+            "generator": "Ninja",
+            "architecture": {
+                "value": "arm64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "win-arm64-ninja-release",
+            "inherits": "win-arm64-base",
+            "displayName": "Windows ARM64 Release (Ninja)",
+            "generator": "Ninja",
+            "architecture": {
+                "value": "arm64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "mac-base",
+            "hidden": true,
+            "inherits": "base",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "CMAKE_OSX_ARCHITECTURES": "arm64"
+            }
+        },
+        {
+            "name": "mac-arm64-xcode",
+            "inherits": "mac-base",
+            "displayName": "macOS ARM64 (Xcode)",
+            "generator": "Xcode"
+        },
+        {
+            "name": "mac-arm64-ninja-debug",
+            "inherits": "mac-base",
+            "displayName": "macOS ARM64 Debug (Ninja)",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "mac-arm64-ninja-release",
+            "inherits": "mac-base",
+            "displayName": "macOS ARM64 Release (Ninja)",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "win-x64-vs2022-debug",
+            "configurePreset": "win-x64-vs2022",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-vs2022-release",
+            "configurePreset": "win-x64-vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-x64-vs2026-debug",
+            "configurePreset": "win-x64-vs2026",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-vs2026-release",
+            "configurePreset": "win-x64-vs2026",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-x64-ninja-debug",
+            "configurePreset": "win-x64-ninja-debug"
+        },
+        {
+            "name": "win-x64-ninja-release",
+            "configurePreset": "win-x64-ninja-release"
+        },
+        {
+            "name": "win-arm64-vs2022-debug",
+            "configurePreset": "win-arm64-vs2022",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-arm64-vs2022-release",
+            "configurePreset": "win-arm64-vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-arm64-vs2026-debug",
+            "configurePreset": "win-arm64-vs2026",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-arm64-vs2026-release",
+            "configurePreset": "win-arm64-vs2026",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-arm64-ninja-debug",
+            "configurePreset": "win-arm64-ninja-debug"
+        },
+        {
+            "name": "win-arm64-ninja-release",
+            "configurePreset": "win-arm64-ninja-release"
+        },
+        {
+            "name": "mac-arm64-xcode-debug",
+            "configurePreset": "mac-arm64-xcode",
+            "configuration": "Debug"
+        },
+        {
+            "name": "mac-arm64-xcode-release",
+            "configurePreset": "mac-arm64-xcode",
+            "configuration": "Release"
+        },
+        {
+            "name": "mac-arm64-ninja-debug",
+            "configurePreset": "mac-arm64-ninja-debug"
+        },
+        {
+            "name": "mac-arm64-ninja-release",
+            "configurePreset": "mac-arm64-ninja-release"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "test-base",
+            "hidden": true,
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false
+            }
+        },
+        {
+            "name": "win-x64-vs2022-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-vs2022",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-vs2022-release",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-x64-vs2026-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-vs2026",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-vs2026-release",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-vs2026",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-x64-ninja-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-ninja-debug"
+        },
+        {
+            "name": "win-x64-ninja-release",
+            "inherits": "test-base",
+            "configurePreset": "win-x64-ninja-release"
+        },
+        {
+            "name": "win-arm64-vs2022-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-vs2022",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-arm64-vs2022-release",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-arm64-vs2026-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-vs2026",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-arm64-vs2026-release",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-vs2026",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-arm64-ninja-debug",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-ninja-debug"
+        },
+        {
+            "name": "win-arm64-ninja-release",
+            "inherits": "test-base",
+            "configurePreset": "win-arm64-ninja-release"
+        },
+        {
+            "name": "mac-arm64-xcode-debug",
+            "inherits": "test-base",
+            "configurePreset": "mac-arm64-xcode",
+            "configuration": "Debug"
+        },
+        {
+            "name": "mac-arm64-xcode-release",
+            "inherits": "test-base",
+            "configurePreset": "mac-arm64-xcode",
+            "configuration": "Release"
+        },
+        {
+            "name": "mac-arm64-ninja-debug",
+            "inherits": "test-base",
+            "configurePreset": "mac-arm64-ninja-debug"
+        },
+        {
+            "name": "mac-arm64-ninja-release",
+            "inherits": "test-base",
+            "configurePreset": "mac-arm64-ninja-release"
+        }
+    ]
+}

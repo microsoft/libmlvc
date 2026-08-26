@@ -1,0 +1,43 @@
+# Install pre-commit with: uv tool install pre-commit
+# Update hook versions with: pre-commit autoupdate
+repos:
+  # General file hygiene and validation
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+  # License headers
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.6
+    hooks:
+      - id: insert-license
+        name: insert-license (C/C++)
+        files: \.(c|cpp|h|hpp|mm)$
+        args: [--license-filepath, .license-header.txt, --comment-style, "//"]
+      - id: insert-license
+        name: insert-license (CMake/Python)
+        files: (CMakeLists\.txt|\.cmake|\.py)$
+        args: [--license-filepath, .license-header.txt, --comment-style, "#"]
+  # Formatters
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.8
+    hooks:
+      - id: clang-format
+        files: ^(src|include|tools|test)/
+        types_or: [c, c++, objective-c++]
+  - repo: https://github.com/BlankSpruce/gersemi-pre-commit
+    rev: 0.27.7
+    hooks:
+      - id: gersemi
+  # Security
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
