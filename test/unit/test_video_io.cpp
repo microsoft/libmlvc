@@ -90,7 +90,7 @@ void ExpectOpenStreamRejected(VideoReader::Options options)
 // Frame reading
 // ============================================================================
 
-TEST(VideoReaderTests, ReadsFramesIncrementally)
+TEST(UnitTestVideoReader, ReadsFramesIncrementally)
 {
     constexpr int frameWidth = 2;
     constexpr int frameHeight = 2;
@@ -122,7 +122,7 @@ TEST(VideoReaderTests, ReadsFramesIncrementally)
     EXPECT_FALSE(end->has_value());
 }
 
-TEST(VideoReaderTests, ReadsFrameAcrossShortStreamReads)
+TEST(UnitTestVideoReader, ReadsFrameAcrossShortStreamReads)
 {
     ChunkedStreamBuffer streamBuffer(std::string{ 0, 1, 2, 3, 4, 5 }, 2);
     std::istream input(&streamBuffer);
@@ -140,7 +140,7 @@ TEST(VideoReaderTests, ReadsFrameAcrossShortStreamReads)
     EXPECT_FALSE(end->has_value());
 }
 
-TEST(VideoReaderTests, EmptyStreamEndsCleanly)
+TEST(UnitTestVideoReader, EmptyStreamEndsCleanly)
 {
     std::istringstream input({}, std::ios::in | std::ios::binary);
     auto reader = VideoReader::OpenStream(input, Nv12Options(2, 2));
@@ -151,7 +151,7 @@ TEST(VideoReaderTests, EmptyStreamEndsCleanly)
     EXPECT_FALSE(frame->has_value());
 }
 
-TEST(VideoReaderTests, RejectsPartialFrame)
+TEST(UnitTestVideoReader, RejectsPartialFrame)
 {
     std::istringstream input(std::string(5, '\0'), std::ios::in | std::ios::binary);
     auto reader = VideoReader::OpenStream(input, Nv12Options(2, 2));
@@ -162,7 +162,7 @@ TEST(VideoReaderTests, RejectsPartialFrame)
     EXPECT_EQ(frame.error(), make_error_code(Error::io_error));
 }
 
-TEST(VideoReaderTests, RejectsReadAfterMove)
+TEST(UnitTestVideoReader, RejectsReadAfterMove)
 {
     std::istringstream input(std::string(6, '\0'), std::ios::in | std::ios::binary);
     auto reader = VideoReader::OpenStream(input, Nv12Options(2, 2));
@@ -182,17 +182,17 @@ TEST(VideoReaderTests, RejectsReadAfterMove)
 // Options validation
 // ============================================================================
 
-TEST(VideoReaderTests, RejectsInvalidDimensions)
+TEST(UnitTestVideoReader, RejectsInvalidDimensions)
 {
     ExpectOpenStreamRejected(Nv12Options(3, 2));
 }
 
-TEST(VideoReaderTests, RejectsMissingDimension)
+TEST(UnitTestVideoReader, RejectsMissingDimension)
 {
     ExpectOpenStreamRejected({ .rawFrameWidth = 2, .rawPixelFormat = VideoReader::PixelFormat::NV12 });
 }
 
-TEST(VideoReaderTests, RejectsStreamWithoutPixelFormat)
+TEST(UnitTestVideoReader, RejectsStreamWithoutPixelFormat)
 {
     ExpectOpenStreamRejected({ .rawFrameWidth = 2, .rawFrameHeight = 2 });
 }
@@ -201,7 +201,7 @@ TEST(VideoReaderTests, RejectsStreamWithoutPixelFormat)
 // File format detection
 // ============================================================================
 
-TEST(VideoReaderTests, StreamsGzipYuv420pAndConvertsToNv12)
+TEST(UnitTestVideoReader, StreamsGzipYuv420pAndConvertsToNv12)
 {
     constexpr int frameWidth = 4;
     constexpr int frameHeight = 2;
@@ -230,7 +230,7 @@ TEST(VideoReaderTests, StreamsGzipYuv420pAndConvertsToNv12)
     EXPECT_FALSE(end->has_value());
 }
 
-TEST(VideoReaderTests, InfersUppercaseGzipNv12Extension)
+TEST(UnitTestVideoReader, InfersUppercaseGzipNv12Extension)
 {
     const std::vector<std::byte> rawFrame(6);
     auto compressed = Compress(rawFrame);
@@ -245,7 +245,7 @@ TEST(VideoReaderTests, InfersUppercaseGzipNv12Extension)
     EXPECT_EQ(frame->value().data, rawFrame);
 }
 
-TEST(VideoReaderTests, ExplicitFileFormatOverridesExtension)
+TEST(UnitTestVideoReader, ExplicitFileFormatOverridesExtension)
 {
     const std::vector<std::byte> i420 = {
         std::byte{ 0 }, std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 }, std::byte{ 4 },  std::byte{ 5 },
@@ -262,7 +262,7 @@ TEST(VideoReaderTests, ExplicitFileFormatOverridesExtension)
     EXPECT_EQ(frame->value().data[10], std::byte{ 9 });
 }
 
-TEST(VideoReaderTests, ExplicitFormatAllowsUnknownExtension)
+TEST(UnitTestVideoReader, ExplicitFormatAllowsUnknownExtension)
 {
     ScopedTempFile file(".raw", std::vector<std::byte>(6));
     auto reader = VideoReader::OpenFile(
@@ -273,7 +273,7 @@ TEST(VideoReaderTests, ExplicitFormatAllowsUnknownExtension)
     ASSERT_TRUE(frame->has_value());
 }
 
-TEST(VideoReaderTests, RejectsUncompressedFileWithGzipExtension)
+TEST(UnitTestVideoReader, RejectsUncompressedFileWithGzipExtension)
 {
     ScopedTempFile file(".nv12.gz", std::vector<std::byte>(6));
     auto reader = VideoReader::OpenFile(file.path, { .rawFrameWidth = 2, .rawFrameHeight = 2 });
@@ -281,7 +281,7 @@ TEST(VideoReaderTests, RejectsUncompressedFileWithGzipExtension)
     EXPECT_EQ(reader.error(), make_error_code(Error::io_error));
 }
 
-TEST(VideoReaderTests, RejectsCorruptGzipStream)
+TEST(UnitTestVideoReader, RejectsCorruptGzipStream)
 {
     auto compressed = Compress(std::vector<std::byte>(6));
     ASSERT_TRUE(compressed);
@@ -301,7 +301,7 @@ TEST(VideoReaderTests, RejectsCorruptGzipStream)
     EXPECT_EQ(nextFrame.error(), make_error_code(Error::io_error));
 }
 
-TEST(VideoReaderTests, RejectsUnsupportedFileFormat)
+TEST(UnitTestVideoReader, RejectsUnsupportedFileFormat)
 {
     ScopedTempFile file(".mp4", std::vector<std::byte>(16));
     auto reader = VideoReader::OpenFile(file.path, { .rawFrameWidth = 2, .rawFrameHeight = 2 });
@@ -313,7 +313,7 @@ TEST(VideoReaderTests, RejectsUnsupportedFileFormat)
 // Frame writing
 // ============================================================================
 
-TEST(VideoWriterTests, WritesNv12Frame)
+TEST(UnitTestVideoWriter, WritesNv12Frame)
 {
     const std::vector<std::byte> frameData = {
         std::byte{ 0 }, std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 }, std::byte{ 4 }, std::byte{ 5 },
@@ -331,7 +331,7 @@ TEST(VideoWriterTests, WritesNv12Frame)
     EXPECT_EQ(input.peek(), std::char_traits<char>::eof());
 }
 
-TEST(VideoWriterTests, WritesI420Frame)
+TEST(UnitTestVideoWriter, WritesI420Frame)
 {
     const std::vector<std::byte> nv12 = {
         std::byte{ 0 }, std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 }, std::byte{ 4 },  std::byte{ 5 },
@@ -353,7 +353,7 @@ TEST(VideoWriterTests, WritesI420Frame)
     EXPECT_EQ(written, expected);
 }
 
-TEST(VideoWriterTests, WritesMkvFile)
+TEST(UnitTestVideoWriter, WritesMkvFile)
 {
     ScopedTempFile file(".mkv", {});
     auto writer = VideoWriter::OpenFile(file.path);
@@ -367,7 +367,7 @@ TEST(VideoWriterTests, WritesMkvFile)
     EXPECT_EQ(signature, (std::array<unsigned char, 4>{ 0x1A, 0x45, 0xDF, 0xA3 }));
 }
 
-TEST(VideoWriterTests, OmitsStridePadding)
+TEST(UnitTestVideoWriter, OmitsStridePadding)
 {
     const std::vector<std::byte> yPlane = {
         std::byte{ 0 }, std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 }, std::byte{ 0xEE }, std::byte{ 0xEE },
@@ -410,7 +410,7 @@ TEST(VideoWriterTests, OmitsStridePadding)
     EXPECT_TRUE(mkvBytes.ends_with(expectedBytes));
 }
 
-TEST(VideoWriterTests, WritesMkvStreamWithFrameRate)
+TEST(UnitTestVideoWriter, WritesMkvStreamWithFrameRate)
 {
     std::ostringstream output(std::ios::binary);
     auto writer = VideoWriter::OpenStream(output, { .format = VideoWriter::Format::MKV, .frameRate = 29.97 });
@@ -432,7 +432,7 @@ TEST(VideoWriterTests, WritesMkvStreamWithFrameRate)
     EXPECT_NE(duration, bytes.end());
 }
 
-TEST(VideoWriterTests, RejectsInvalidFrameGeometry)
+TEST(UnitTestVideoWriter, RejectsInvalidFrameGeometry)
 {
     std::ostringstream output(std::ios::binary);
     auto writer = VideoWriter::OpenStream(output, { .format = VideoWriter::Format::NV12 });
@@ -442,7 +442,7 @@ TEST(VideoWriterTests, RejectsInvalidFrameGeometry)
     EXPECT_EQ(write.error(), make_error_code(Error::invalid_argument));
 }
 
-TEST(VideoWriterTests, RejectsMkvResolutionChange)
+TEST(UnitTestVideoWriter, RejectsMkvResolutionChange)
 {
     std::ostringstream output(std::ios::binary);
     auto writer = VideoWriter::OpenStream(output, { .format = VideoWriter::Format::MKV });
@@ -454,7 +454,7 @@ TEST(VideoWriterTests, RejectsMkvResolutionChange)
     EXPECT_TRUE(writer->Close());
 }
 
-TEST(VideoWriterTests, MoveAssignsFileWriter)
+TEST(UnitTestVideoWriter, MoveAssignsFileWriter)
 {
     ScopedTempFile firstFile(".mkv", {});
     ScopedTempFile secondFile(".mkv", {});
@@ -470,7 +470,7 @@ TEST(VideoWriterTests, MoveAssignsFileWriter)
     EXPECT_TRUE(second->Close());
 }
 
-TEST(VideoWriterTests, ReturnsErrorForFailingOutputStream)
+TEST(UnitTestVideoWriter, ReturnsErrorForFailingOutputStream)
 {
     for (const auto format : { VideoWriter::Format::NV12, VideoWriter::Format::MKV }) {
         FailingOutputBuffer buffer;
@@ -483,7 +483,7 @@ TEST(VideoWriterTests, ReturnsErrorForFailingOutputStream)
     }
 }
 
-TEST(VideoWriterTests, RejectsInvalidOutputStreamAndFrameRate)
+TEST(UnitTestVideoWriter, RejectsInvalidOutputStreamAndFrameRate)
 {
     std::ostringstream failedOutput;
     failedOutput.setstate(std::ios::badbit);
@@ -498,7 +498,7 @@ TEST(VideoWriterTests, RejectsInvalidOutputStreamAndFrameRate)
     EXPECT_EQ(invalidFpsWriter.error(), make_error_code(Error::invalid_argument));
 }
 
-TEST(VideoWriterTests, RejectsChangedOutputStreamExceptionMask)
+TEST(UnitTestVideoWriter, RejectsChangedOutputStreamExceptionMask)
 {
     for (const auto format : { VideoWriter::Format::NV12, VideoWriter::Format::MKV }) {
         std::ostringstream output;
@@ -512,7 +512,7 @@ TEST(VideoWriterTests, RejectsChangedOutputStreamExceptionMask)
     }
 }
 
-TEST(VideoWriterTests, EmptyMkvFailsAndTruncatesExistingFile)
+TEST(UnitTestVideoWriter, EmptyMkvFailsAndTruncatesExistingFile)
 {
     const std::vector<std::byte> staleData = { std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 } };
     ScopedTempFile file(".mkv", staleData);
@@ -527,7 +527,7 @@ TEST(VideoWriterTests, EmptyMkvFailsAndTruncatesExistingFile)
     EXPECT_EQ(std::filesystem::file_size(file.path), 0u);
 }
 
-TEST(VideoWriterTests, RejectsUnsupportedFileFormat)
+TEST(UnitTestVideoWriter, RejectsUnsupportedFileFormat)
 {
     ScopedTempFile file(".mp4", {});
     auto writer = VideoWriter::OpenFile(file.path);
@@ -539,7 +539,7 @@ TEST(VideoWriterTests, RejectsUnsupportedFileFormat)
 // LoadNv12Frames
 // ============================================================================
 
-TEST(VideoReaderTests, LoadNv12FramesWithoutLimitReadsToEnd)
+TEST(UnitTestVideoReader, LoadNv12FramesWithoutLimitReadsToEnd)
 {
     ScopedTempFile file(".nv12", std::vector<std::byte>(12));
     auto frames = LoadNv12Frames(file.path, { .rawFrameWidth = 2, .rawFrameHeight = 2 });

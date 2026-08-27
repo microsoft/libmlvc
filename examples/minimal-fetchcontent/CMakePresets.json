@@ -15,7 +15,6 @@
       "name": "win-base",
       "hidden": true,
       "inherits": "base",
-      "generator": "Visual Studio 17 2022",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -23,48 +22,48 @@
       }
     },
     {
-      "name": "win-arm64-base",
-      "hidden": true,
-      "inherits": "win-base",
-      "architecture": "ARM64"
-    },
-    {
-      "name": "win-arm64-static",
-      "inherits": "win-arm64-base",
-      "displayName": "Windows ARM64 static",
-      "cacheVariables": {
-        "BUILD_SHARED_LIBS": "OFF"
-      }
-    },
-    {
-      "name": "win-arm64-shared",
-      "inherits": "win-arm64-base",
-      "displayName": "Windows ARM64 shared",
-      "cacheVariables": {
-        "BUILD_SHARED_LIBS": "ON"
-      }
-    },
-    {
       "name": "win-x64-base",
       "hidden": true,
-      "inherits": "win-base",
       "architecture": "x64"
     },
     {
-      "name": "win-x64-static",
-      "inherits": "win-x64-base",
-      "displayName": "Windows x64 static",
+      "name": "win-arm64-base",
+      "hidden": true,
+      "architecture": "ARM64"
+    },
+    {
+      "name": "static-base",
+      "hidden": true,
       "cacheVariables": {
         "BUILD_SHARED_LIBS": "OFF"
       }
     },
     {
-      "name": "win-x64-shared",
-      "inherits": "win-x64-base",
-      "displayName": "Windows x64 shared",
+      "name": "shared-base",
+      "hidden": true,
       "cacheVariables": {
         "BUILD_SHARED_LIBS": "ON"
       }
+    },
+    {
+      "name": "win-x64-static",
+      "inherits": ["win-base", "win-x64-base", "static-base"],
+      "displayName": "Windows x64 static"
+    },
+    {
+      "name": "win-x64-shared",
+      "inherits": ["win-base", "win-x64-base", "shared-base"],
+      "displayName": "Windows x64 shared"
+    },
+    {
+      "name": "win-arm64-static",
+      "inherits": ["win-base", "win-arm64-base", "static-base"],
+      "displayName": "Windows ARM64 static"
+    },
+    {
+      "name": "win-arm64-shared",
+      "inherits": ["win-base", "win-arm64-base", "shared-base"],
+      "displayName": "Windows ARM64 shared"
     },
     {
       "name": "mac-arm64-base",
@@ -82,42 +81,16 @@
     },
     {
       "name": "mac-arm64-static",
-      "inherits": "mac-arm64-base",
-      "displayName": "macOS ARM64 static",
-      "cacheVariables": {
-        "BUILD_SHARED_LIBS": "OFF"
-      }
+      "inherits": ["mac-arm64-base", "static-base"],
+      "displayName": "macOS ARM64 static"
     },
     {
       "name": "mac-arm64-shared",
-      "inherits": "mac-arm64-base",
-      "displayName": "macOS ARM64 shared",
-      "cacheVariables": {
-        "BUILD_SHARED_LIBS": "ON"
-      }
+      "inherits": ["mac-arm64-base", "shared-base"],
+      "displayName": "macOS ARM64 shared"
     }
   ],
   "buildPresets": [
-    {
-      "name": "win-arm64-static-debug",
-      "configurePreset": "win-arm64-static",
-      "configuration": "Debug"
-    },
-    {
-      "name": "win-arm64-static-release",
-      "configurePreset": "win-arm64-static",
-      "configuration": "Release"
-    },
-    {
-      "name": "win-arm64-shared-debug",
-      "configurePreset": "win-arm64-shared",
-      "configuration": "Debug"
-    },
-    {
-      "name": "win-arm64-shared-release",
-      "configurePreset": "win-arm64-shared",
-      "configuration": "Release"
-    },
     {
       "name": "win-x64-static-debug",
       "configurePreset": "win-x64-static",
@@ -136,6 +109,26 @@
     {
       "name": "win-x64-shared-release",
       "configurePreset": "win-x64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-static-debug",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-static-release",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-shared-debug",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-shared-release",
+      "configurePreset": "win-arm64-shared",
       "configuration": "Release"
     },
     {

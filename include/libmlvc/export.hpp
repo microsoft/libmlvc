@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+/// @file
+/// Defines libmlvc symbol visibility and deprecation annotations.
+
 #ifndef LIBMLVC_EXPORT_HPP
 #define LIBMLVC_EXPORT_HPP
 

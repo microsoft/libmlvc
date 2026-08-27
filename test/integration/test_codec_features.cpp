@@ -524,6 +524,7 @@ protected:
     CodecFeatureTests()
     {
         // To speed up tests, disable session caching
+        m_managerParams.computeUnit = GetTestConfig().computeUnit;
         m_managerParams.enableSessionCaching = false;
         m_managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
     }
@@ -1184,9 +1185,12 @@ TEST_F(CodecFeatureTests, Encoder_InvalidResolution)
     std::optional<MlvcEncoder> encoder;
     ASSERT_NO_FATAL_FAILURE(SetupEncoder(*manager, encoder));
 
-    auto oversizedFrame = MakeDummyFrame(2000, 2000);
-    auto result = encoder->Encode(oversizedFrame.View(), {});
-    EXPECT_FALSE(result) << "Oversized frame should be rejected";
+    for (const auto& frame : { MakeDummyFrame(320, 180), MakeDummyFrame(DEFAULT_WIDTH, 358), MakeDummyFrame(2000, 2000) }) {
+        auto result = encoder->Encode(frame.View(), {});
+        ASSERT_FALSE(result) << "Mismatched frame dimensions should be rejected";
+        EXPECT_EQ(result.error(), make_error_code(Error::invalid_argument));
+    }
+    EXPECT_EQ(encoder->GetStats().numFramesAttempted, 0);
 
     // Encoder should remain usable
     auto validFrame = MakeDummyFrame();

@@ -5,16 +5,18 @@
 #include <libmlvc/types.hpp>
 
 #include <span>
+#include <string_view>
 
 namespace libmlvc {
 
 struct TestConfig {
     MlvcVersion mlvcVersion;
-    LogLevel logLevel = LogLevel::Warn;
+    ComputeUnit computeUnit = ComputeUnit::NPU;
     WinMlInitMode winmlInitMode = WinMlInitMode::AppSdk;
+    LogLevel logLevel = LogLevel::Warn;
 };
 
-bool ParseTestConfig(std::span<char* const> args);
+bool ParseTestConfig(std::span<const std::string_view> args);
 void PrintTestConfigHelp();
 const TestConfig& GetTestConfig();
 

@@ -531,6 +531,11 @@ VideoWriter& VideoWriter::operator=(VideoWriter&& other) noexcept
     return *this;
 }
 
+expected<VideoWriter> VideoWriter::OpenFile(const std::filesystem::path& filename)
+{
+    return OpenFile(filename, Options{});
+}
+
 expected<VideoWriter> VideoWriter::OpenFile(const std::filesystem::path& filename, Options options)
 {
     auto& format = options.format;

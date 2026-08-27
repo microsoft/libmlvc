@@ -6,12 +6,15 @@ Fetches Boost.JSON and libmlvc at configure time, then links the source-tree CMa
 
 ## Requirements
 
-Requires Git, CMake 3.30+, and a C++20 toolchain.
+Requires Git, CMake 3.30+ (4.2+ for Visual Studio 2026), and a C++20 toolchain.
 
 ## Build and run
 
 Preset names are `<platform>-<linkage>` and `<platform>-<linkage>-<config>`, where linkage is
 `static` or `shared` and config is `debug` or `release`.
+
+The optional final argument selects `auto`, `cpu`, `gpu`, or `npu` as the compute unit. The default
+is `npu`.
 
 ### Windows ARM64
 

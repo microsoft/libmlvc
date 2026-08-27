@@ -67,7 +67,7 @@ int testmain(int argc, char** argv)
     // Split gtest, gbenchmark, and custom command line arguments
     std::vector<char*> gtestArgs = { argv[0] };
     g_benchmarkArgs.push_back(argv[0]);
-    std::vector<char*> configArgs;
+    std::vector<std::string_view> configArgs;
     bool helpRequested = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{ argv[i] };
@@ -79,7 +79,7 @@ int testmain(int argc, char** argv)
         } else if (arg.starts_with("--gtest") || arg.starts_with("--seed")) {
             gtestArgs.push_back(argv[i]);
         } else {
-            configArgs.push_back(argv[i]);
+            configArgs.push_back(arg);
         }
     }
     gtestArgs.push_back(nullptr);

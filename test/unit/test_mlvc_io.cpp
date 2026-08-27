@@ -78,7 +78,7 @@ const std::vector<std::byte> kVclAccessUnit2 = MakeBytes({ 0, 0, 0, 1, 0x02, 0xB
 // Access unit reading
 // ============================================================================
 
-TEST(MlvcReaderTests, ReadsAccessUnitsIncrementally)
+TEST(UnitTestMlvcReader, ReadsAccessUnitsIncrementally)
 {
     auto data = kVclAccessUnit1;
     data.insert(data.end(), kVclAccessUnit2.begin(), kVclAccessUnit2.end());
@@ -102,7 +102,7 @@ TEST(MlvcReaderTests, ReadsAccessUnitsIncrementally)
     EXPECT_FALSE(end->has_value());
 }
 
-TEST(MlvcReaderTests, GroupsNonVclNalsWithVcl)
+TEST(UnitTestMlvcReader, GroupsNonVclNalsWithVcl)
 {
     auto data = MakeBytes({ 0, 0, 0, 1, 0x40, 0xCC, 0, 0, 0, 1, 0x02, 0xDD });
     std::istringstream input(AsString(data), std::ios::in | std::ios::binary);
@@ -120,7 +120,7 @@ TEST(MlvcReaderTests, GroupsNonVclNalsWithVcl)
     EXPECT_FALSE(end->has_value());
 }
 
-TEST(MlvcReaderTests, RejectsInvalidStream)
+TEST(UnitTestMlvcReader, RejectsInvalidStream)
 {
     std::istringstream input;
     input.setstate(std::ios::badbit);
@@ -130,7 +130,7 @@ TEST(MlvcReaderTests, RejectsInvalidStream)
     EXPECT_EQ(reader.error(), make_error_code(Error::io_error));
 }
 
-TEST(MlvcReaderTests, RejectsChangedInputStreamState)
+TEST(UnitTestMlvcReader, RejectsChangedInputStreamState)
 {
     {
         std::istringstream input(AsString(kVclAccessUnit1), std::ios::in | std::ios::binary);
@@ -154,7 +154,7 @@ TEST(MlvcReaderTests, RejectsChangedInputStreamState)
     }
 }
 
-TEST(MlvcReaderTests, RejectsMissingStartCode)
+TEST(UnitTestMlvcReader, RejectsMissingStartCode)
 {
     auto data = MakeBytes({ 0xDE, 0xAD, 0xBE, 0xEF });
     std::istringstream input(AsString(data), std::ios::in | std::ios::binary);
@@ -167,7 +167,7 @@ TEST(MlvcReaderTests, RejectsMissingStartCode)
     EXPECT_EQ(accessUnit.error(), make_error_code(Error::io_error));
 }
 
-TEST(MlvcReaderTests, RejectsReadAfterMove)
+TEST(UnitTestMlvcReader, RejectsReadAfterMove)
 {
     std::istringstream input(AsString(kVclAccessUnit1), std::ios::in | std::ios::binary);
     auto reader = MlvcReader::OpenStream(input);
@@ -183,7 +183,7 @@ TEST(MlvcReaderTests, RejectsReadAfterMove)
     EXPECT_TRUE(movedRead->has_value());
 }
 
-TEST(MlvcReaderTests, ReadsManyAccessUnitsAcrossReadChunks)
+TEST(UnitTestMlvcReader, ReadsManyAccessUnitsAcrossReadChunks)
 {
     // Total size spans several internal read chunks to exercise incremental parsing.
     constexpr int accessUnitCount = 200;
@@ -215,7 +215,7 @@ TEST(MlvcReaderTests, ReadsManyAccessUnitsAcrossReadChunks)
     EXPECT_EQ(count, accessUnitCount);
 }
 
-TEST(MlvcReaderTests, ReadsStartCodeAcrossReadChunkBoundary)
+TEST(UnitTestMlvcReader, ReadsStartCodeAcrossReadChunkBoundary)
 {
     constexpr size_t readChunkSize = 64 * 1024;
     constexpr size_t secondStartCodeOffset = readChunkSize - 3;
@@ -242,7 +242,7 @@ TEST(MlvcReaderTests, ReadsStartCodeAcrossReadChunkBoundary)
 // Access unit writing
 // ============================================================================
 
-TEST(MlvcWriterTests, WritesAccessUnitsToStream)
+TEST(UnitTestMlvcWriter, WritesAccessUnitsToStream)
 {
     std::ostringstream output(std::ios::binary);
     auto writer = MlvcWriter::OpenStream(output);
@@ -256,7 +256,7 @@ TEST(MlvcWriterTests, WritesAccessUnitsToStream)
     EXPECT_EQ(output.str(), AsString(expected));
 }
 
-TEST(MlvcWriterTests, WritesFileReadableByMlvcReader)
+TEST(UnitTestMlvcWriter, WritesFileReadableByMlvcReader)
 {
     ScopedTempFile file(".mlvc", {});
     auto writer = MlvcWriter::OpenFile(file.path);
@@ -272,7 +272,7 @@ TEST(MlvcWriterTests, WritesFileReadableByMlvcReader)
     EXPECT_EQ((*accessUnits)[1].data, kVclAccessUnit2);
 }
 
-TEST(MlvcWriterTests, ReturnsErrorForFailingOutputStream)
+TEST(UnitTestMlvcWriter, ReturnsErrorForFailingOutputStream)
 {
     {
         FailingOutputBuffer buffer;
@@ -311,7 +311,7 @@ TEST(MlvcWriterTests, ReturnsErrorForFailingOutputStream)
 // ReadMlvcAccessUnits
 // ============================================================================
 
-TEST(MlvcReaderTests, ReadMlvcAccessUnitsRespectsLimit)
+TEST(UnitTestMlvcReader, ReadMlvcAccessUnitsRespectsLimit)
 {
     auto data = kVclAccessUnit1;
     data.insert(data.end(), kVclAccessUnit2.begin(), kVclAccessUnit2.end());
@@ -322,7 +322,7 @@ TEST(MlvcReaderTests, ReadMlvcAccessUnitsRespectsLimit)
     EXPECT_EQ(accessUnits->size(), 1u);
 }
 
-TEST(MlvcReaderTests, ReadMlvcAccessUnitsRejectsMissingFile)
+TEST(UnitTestMlvcReader, ReadMlvcAccessUnitsRejectsMissingFile)
 {
     auto accessUnits = ReadMlvcAccessUnits("nonexistent_access_unit_file.mlvc");
     ASSERT_FALSE(accessUnits);

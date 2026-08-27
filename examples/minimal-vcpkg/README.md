@@ -6,7 +6,7 @@ Uses vcpkg manifest mode and an overlay port, then consumes the installed libmlv
 
 ## Requirements
 
-Requires Git, CMake 3.30+, a C++20 toolchain, and bootstrapped vcpkg:
+Requires Git, CMake 3.30+ (4.2+ for Visual Studio 2026), a C++20 toolchain, and bootstrapped vcpkg:
 
 ```text
 # PowerShell
@@ -20,6 +20,9 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 Preset names are `<platform>-<linkage>` and `<platform>-<linkage>-<config>`, where linkage is
 `static` or `shared` and config is `debug` or `release`.
+
+The optional final argument selects `auto`, `cpu`, `gpu`, or `npu` as the compute unit. The default
+is `npu`.
 
 ### Windows ARM64
 

@@ -6,6 +6,7 @@
 #include "libmlvc/codec/manager.hpp"
 #include "libmlvc/common/utils.hpp"
 
+#include <limits>
 #include <sstream>
 
 namespace libmlvc {
@@ -407,20 +408,33 @@ expected<void> MlvcEncoderImpl::ValidateEncoderConfig(const EncoderConfig& confi
 
 expected<void> MlvcEncoderImpl::ValidateInputFrame(const Nv12FrameView& frame) const
 {
+    if (frame.Width() != m_config.width || frame.Height() != m_config.height) {
+        MLVC_LOG_ERROR("Invalid input frame dimensions: %dx%d (expected %dx%d)", frame.Width(), frame.Height(),
+                       m_config.width, m_config.height);
+        return make_error_code(Error::invalid_argument);
+    }
+
     if (frame.Stride() < frame.Width()) {
         MLVC_LOG_ERROR("Invalid input frame stride: %d (expected >= %d)", frame.Stride(), frame.Width());
         return make_error_code(Error::invalid_argument);
     }
 
-    if (frame.YPlane().size() != static_cast<size_t>(frame.Stride() * frame.Height())) {
-        MLVC_LOG_ERROR("Invalid Y plane size: %zu (expected %d)", frame.YPlane().size(),
-                       static_cast<size_t>(frame.Stride() * frame.Height()));
+    const auto stride = static_cast<size_t>(frame.Stride());
+    const auto height = static_cast<size_t>(frame.Height());
+    if (height > std::numeric_limits<size_t>::max() / stride) {
+        MLVC_LOG_ERROR("Input frame plane size exceeds the supported range");
         return make_error_code(Error::invalid_argument);
     }
 
-    if (frame.UvPlane().size() != static_cast<size_t>(frame.Stride() * frame.Height() / 2)) {
-        MLVC_LOG_ERROR("Invalid UV plane size: %zu (expected %d)", frame.UvPlane().size(),
-                       static_cast<size_t>(frame.Stride() * frame.Height() / 2));
+    const size_t yPlaneSize = stride * height;
+    const size_t uvPlaneSize = yPlaneSize / 2;
+    if (frame.YPlane().size() != yPlaneSize) {
+        MLVC_LOG_ERROR("Invalid Y plane size: %zu (expected %zu)", frame.YPlane().size(), yPlaneSize);
+        return make_error_code(Error::invalid_argument);
+    }
+
+    if (frame.UvPlane().size() != uvPlaneSize) {
+        MLVC_LOG_ERROR("Invalid UV plane size: %zu (expected %zu)", frame.UvPlane().size(), uvPlaneSize);
         return make_error_code(Error::invalid_argument);
     }
     return {};

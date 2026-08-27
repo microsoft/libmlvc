@@ -685,10 +685,6 @@ bool IsPlatformSupported()
             MLVC_LOG_WARN("CPU does not support AVX2 (required for MLVC on x86_64)");
             return false;
         }
-        if (!platform.hasAVXVNNI) {
-            MLVC_LOG_WARN("CPU does not support AVX-VNNI (required for MLVC on x86_64)");
-            return false;
-        }
 #elif defined(MLVC_ARCH_ARM64)
         if (!platform.hasDotProd) {
             MLVC_LOG_WARN("CPU does not support dotprod (required for MLVC on arm64)");

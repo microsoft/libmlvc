@@ -1,12 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+/// @file
+/// Error wrapper used to construct failed `expected` results.
+
 #pragma once
 #include <type_traits>
 #include <utility>
 
 namespace libmlvc {
 
+/// Wrapper used to construct an `expected` result containing an error.
 template <typename E>
 class unexpected_type {
 public:

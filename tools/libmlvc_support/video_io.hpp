@@ -63,7 +63,8 @@ public:
         double frameRate = 30.0;
     };
 
-    static expected<VideoWriter> OpenFile(const std::filesystem::path& filename, Options options = {});
+    static expected<VideoWriter> OpenFile(const std::filesystem::path& filename);
+    static expected<VideoWriter> OpenFile(const std::filesystem::path& filename, Options options);
     static expected<VideoWriter> OpenStream(std::ostream& output, Options options);
 
     ~VideoWriter();

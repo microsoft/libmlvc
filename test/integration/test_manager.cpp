@@ -83,6 +83,7 @@ protected:
     ManagerTests()
     {
         // To speed up tests, disable session caching
+        m_managerParams.computeUnit = GetTestConfig().computeUnit;
         m_managerParams.enableSessionCaching = false;
         m_managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
     }

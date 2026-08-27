@@ -21,10 +21,12 @@
     #pragma comment(lib, "shell32.lib")
 #endif
 
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <ranges>
 #include <sstream>
+#include <string_view>
 
 namespace libmlvc {
 namespace {
@@ -39,6 +41,15 @@ std::string MlvcVersions2Str(std::span<const MlvcVersion> versions)
         if (i + 1 < versions.size()) stream << ", ";
     }
     return stream.str();
+}
+
+std::string ToUpper(std::string_view value)
+{
+    std::string result{ value };
+    for (auto& c : result) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return result;
 }
 
 expected<std::filesystem::path> GetAppDataDir()
@@ -392,7 +403,7 @@ expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
         MLVC_LOG_WARN(
             "MLVC is primarily designed for NPU inference. Running on %s may result in degraded "
             "performance or unexpected behavior.",
-            ComputeUnitToString(computeUnit));
+            ToUpper(ComputeUnitToString(computeUnit)).c_str());
     }
 
 #if defined(MLVC_PLATFORM_WINCLASSIC)

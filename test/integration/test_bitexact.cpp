@@ -691,6 +691,7 @@ protected:
         }
 
         ManagerParams managerParams;
+        managerParams.computeUnit = GetTestConfig().computeUnit;
         managerParams.enableSessionCaching = false;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
         m_manager = std::make_shared<MlvcManagerImpl>(managerParams);

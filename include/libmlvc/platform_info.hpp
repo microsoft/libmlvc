@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+/// @file
+/// Operating-system, processor, and accelerator discovery API.
+
 #pragma once
 #include <libmlvc/export.hpp>
 #include <libmlvc/types.hpp>
@@ -11,10 +14,11 @@ namespace libmlvc {
 // Platform information types
 // --------------------------------------------------------------------------------------
 
+/// Operating-system version components.
 struct OsVersion {
     int major{};
     int minor{};
-    int build{};  // Windows: build number (e.g. 26100); unused on macOS/iOS
+    int build{};  ///< Windows build number; zero on macOS and iOS.
 
     auto operator<=>(const OsVersion&) const = default;
     std::string ToString() const
@@ -25,7 +29,10 @@ struct OsVersion {
     }
 };
 
+/// Hardware accelerator category.
 enum struct AcceleratorType { GPU, NPU };
+
+/// Returns the string name of an accelerator type.
 inline const char* AcceleratorTypeToString(AcceleratorType type)
 {
     switch (type) {
@@ -37,55 +44,62 @@ inline const char* AcceleratorTypeToString(AcceleratorType type)
     return "unknown";
 }
 
+/// Discovered accelerator and driver information.
+///
+/// Fields may be empty when the operating system does not report the corresponding property.
 struct AcceleratorInfo {
     // Device
     AcceleratorType type{ AcceleratorType::GPU };
     std::string name;
-    std::string vendorName;  // VENDOR_* constants ("Intel", "Qualcomm", ...)
-    std::string vendorId;    // PCI ("8086") or ACPI ("QCOM")
+    std::string vendorName;
+    std::string vendorId;  ///< PCI or ACPI vendor identifier.
     std::string deviceId;
 
     // Driver
     std::string driverVersion;
     std::string driverDate;
 
-    // Windows-only
-    int64_t luid{};  // adapter LUID (0 if unavailable)
+    int64_t luid{};  ///< Windows adapter LUID, or zero when unavailable.
 };
 
+/// Operating-system, processor, and accelerator information.
 struct PlatformInfo {
-    // OS / hardware
-    std::string osName;          // "macOS", "iOS", "Windows"
-    OsVersion osVersion;         // e.g. 15.2 on macOS, 10.0.26100 on Windows
-    std::string hwManufacturer;  // e.g. "Apple", "LENOVO", "Microsoft Corporation"
-    std::string hwModel;         // e.g. "Mac16,1", "iPhone17,3", "83ED"
+    // OS and hardware
+    std::string osName;  ///< `macOS`, `iOS`, or `Windows`.
+    OsVersion osVersion;
+    std::string hwManufacturer;
+    std::string hwModel;
 
     // CPU
-    std::string cpuArch;    // "arm64", "x86_64"
-    std::string cpuVendor;  // "Intel", "AMD", "Apple", "Qualcomm", etc.
-    std::string cpuSeries;  // series name: "M4", "Arrow Lake", "Snapdragon X1"
-    std::string cpuName;    // full name: "Apple M4 Pro", "12th Gen Intel Core i7-12700K"
+    std::string cpuArch;  ///< `arm64` or `x86_64`.
+    std::string cpuVendor;
+    std::string cpuSeries;  ///< CPU family used by support checks, or `unknown`.
+    std::string cpuName;    ///< Device identifier on iOS, where the CPU brand is unavailable.
 
     // CPU features
-    bool hasFP16{};     // x86/ARM64, F16C (x86) / FEAT_FP16 (ARM64)
-    bool hasAVX2{};     // x86, AVX2
-    bool hasAVXVNNI{};  // x86, AVX-VNNI (VEX)
-    bool hasDotProd{};  // ARM64, FEAT_DotProd / SDOT
+    bool hasFP16{};     ///< Whether F16C is usable on x86 or FP16 arithmetic is available on ARM64.
+    bool hasAVX2{};     ///< Whether AVX2 is usable on x86.
+    bool hasAVXVNNI{};  ///< Whether VEX-encoded AVX-VNNI is usable on x86.
+    bool hasDotProd{};  ///< Whether ARM64 dot-product instructions are available (`FEAT_DotProd`/`SDOT`).
 
-    // Accelerators (GPUs and NPUs)
-    std::vector<AcceleratorInfo> accelerators;
+    std::vector<AcceleratorInfo> accelerators;  ///< Windows GPUs and NPUs; empty on Apple platforms.
 };
 
 // --------------------------------------------------------------------------------------
 // Platform information APIs
 // --------------------------------------------------------------------------------------
 
+/// Returns detected OS, CPU, and accelerator information.
+/// The returned reference remains valid until the process exits.
 LIBMLVC_EXPORT const PlatformInfo& GetPlatformInfo();
 
-// Returns true if the current platform meets minimum requirements for MLVC (OS version, CPU features).
+/// Returns whether the OS version and required CPU features meet libmlvc minimums.
+///
+/// This does not test inference provider readiness or detect an NPU. The result is calculated once.
 LIBMLVC_EXPORT bool IsPlatformSupported();
 
-// Returns true if the current platform has a known supported NPU (Apple ANE, Intel NPU, or Qualcomm NPU).
+/// Returns whether the detected CPU is on libmlvc's list of platforms with supported NPUs.
+/// This does not detect an NPU or verify that an inference provider can use it.
 LIBMLVC_EXPORT bool HasSupportedNpu();
 
 }  // namespace libmlvc

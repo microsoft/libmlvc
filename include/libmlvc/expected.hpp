@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+/// @file
+/// Result type returned by libmlvc operations.
+
 #pragma once
 
 #include <libmlvc/unexpected.hpp>
@@ -55,6 +58,10 @@ private:
 };
 }  // namespace internal
 
+/// Result containing either a value of type `T` or an error of type `E`.
+///
+/// Test the result with `operator bool()` before accessing it. Calling `value()` on an error or
+/// `error()` on a value terminates the process. Reference value types are not supported.
 template <typename T, typename E = std::error_code>
 class expected : private internal::expected_storage<T, E> {
 
@@ -410,6 +417,10 @@ class expected<T&, E> {
     static_assert(!std::is_reference<T&>::value, "expected<T&> is not supported");
 };
 
+/// Result representing either success without a value or an error of type `E`.
+///
+/// Test the result with `operator bool()` before accessing its error. Calling `error()` on success
+/// terminates the process.
 template <typename E>
 class expected<void, E> : private internal::expected_storage<void, E> {
 
@@ -580,6 +591,7 @@ public:
 
     explicit operator bool() const noexcept { return has_value; }
 
+    /// Checks for success with a debug assertion; does nothing in release builds.
     void value() const noexcept { assert(*this); }
 
     const E& error() const noexcept

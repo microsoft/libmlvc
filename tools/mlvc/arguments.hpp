@@ -32,7 +32,7 @@ class CommonArguments : public IArguments {
 public:
     std::filesystem::path modelBundlesDir = GetDefaultModelBundlesDir();
     MlvcVersion mlvcVersion = GetDefaultModelVersion();
-    ComputeUnit computeUnit = ComputeUnit::AUTO;
+    ComputeUnit computeUnit = ComputeUnit::NPU;
     LogLevel logLevel = LogLevel::Error;
     bool enableModelCache = true;
     bool enableSessionCaching = true;

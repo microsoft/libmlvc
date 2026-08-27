@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+/// @file
+/// Error codes and decoder recovery helpers.
+
 #pragma once
 #include <libmlvc/export.hpp>
 
@@ -8,7 +11,9 @@
 
 namespace libmlvc {
 
-// Append-only: don't reuse or change values
+/// Stable libmlvc error values.
+///
+/// Values are append-only and existing numeric values must not be changed or reused.
 enum class Error : int {
     // Generic errors
     io_error = 1,
@@ -42,22 +47,25 @@ enum class Error : int {
     incompatible_ep_version_error = 23,
 };
 
+/// Returns the `std::error_category` used by libmlvc error codes.
+/// The returned reference remains valid until the process exits.
 LIBMLVC_EXPORT const std::error_category& error_category() noexcept;
 
+/// Creates a `std::error_code` in the libmlvc error category.
 inline std::error_code make_error_code(Error e) noexcept
 {
     return std::error_code(static_cast<int>(e), error_category());
 }
 
+/// Returns whether the input ended before the access unit contained a complete frame.
 inline bool IsPartialAccessUnitError(const std::error_code& ec) noexcept
 {
     return ec == make_error_code(Error::bit_stream_partial_access_unit_error);
 }
 
+/// Returns whether a decoder error is classified as recoverable by receiving a fresh IDR frame.
 inline bool IsRecoverableDecoderError(const std::error_code& ec) noexcept
 {
-    // Decoder errors that can be recovered by receiving a fresh IDR frame.
-    // Excludes fatal errors (model init, inference, encoder-side) that require re-initialization.
     return ec == make_error_code(Error::reference_error) || ec == make_error_code(Error::bit_stream_missing_sps_error)
            || ec == make_error_code(Error::bit_stream_missing_pps_error)
            || ec == make_error_code(Error::bit_stream_partial_access_unit_error)

@@ -16,7 +16,6 @@
       "name": "win-base",
       "hidden": true,
       "inherits": "base",
-      "generator": "Visual Studio 17 2022",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -24,47 +23,39 @@
       }
     },
     {
-      "name": "win-arm64-base",
-      "hidden": true,
-      "inherits": "win-base",
-      "architecture": "ARM64"
-    },
-    {
-      "name": "win-arm64-static",
-      "inherits": "win-arm64-base",
-      "displayName": "Windows ARM64 static",
-      "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-windows-static-md"
-      }
-    },
-    {
-      "name": "win-arm64-shared",
-      "inherits": "win-arm64-base",
-      "displayName": "Windows ARM64 shared",
-      "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-windows"
-      }
-    },
-    {
-      "name": "win-x64-base",
-      "hidden": true,
-      "inherits": "win-base",
-      "architecture": "x64"
-    },
-    {
       "name": "win-x64-static",
-      "inherits": "win-x64-base",
+      "inherits": "win-base",
       "displayName": "Windows x64 static",
+      "architecture": "x64",
       "cacheVariables": {
         "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
       }
     },
     {
       "name": "win-x64-shared",
-      "inherits": "win-x64-base",
+      "inherits": "win-base",
       "displayName": "Windows x64 shared",
+      "architecture": "x64",
       "cacheVariables": {
         "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "win-arm64-static",
+      "inherits": "win-base",
+      "displayName": "Windows ARM64 static",
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows-static-md"
+      }
+    },
+    {
+      "name": "win-arm64-shared",
+      "inherits": "win-base",
+      "displayName": "Windows ARM64 shared",
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows"
       }
     },
     {
@@ -100,26 +91,6 @@
   ],
   "buildPresets": [
     {
-      "name": "win-arm64-static-debug",
-      "configurePreset": "win-arm64-static",
-      "configuration": "Debug"
-    },
-    {
-      "name": "win-arm64-static-release",
-      "configurePreset": "win-arm64-static",
-      "configuration": "Release"
-    },
-    {
-      "name": "win-arm64-shared-debug",
-      "configurePreset": "win-arm64-shared",
-      "configuration": "Debug"
-    },
-    {
-      "name": "win-arm64-shared-release",
-      "configurePreset": "win-arm64-shared",
-      "configuration": "Release"
-    },
-    {
       "name": "win-x64-static-debug",
       "configurePreset": "win-x64-static",
       "configuration": "Debug"
@@ -137,6 +108,26 @@
     {
       "name": "win-x64-shared-release",
       "configurePreset": "win-x64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-static-debug",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-static-release",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-shared-debug",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-shared-release",
+      "configurePreset": "win-arm64-shared",
       "configuration": "Release"
     },
     {
