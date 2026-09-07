@@ -16,7 +16,13 @@
 #
 # Standalone builds use fixed Windows App SDK versions.
 set(WINDOWSAPPSDK_ML_VERSION "1.8.2141")
+set(WINDOWSAPPSDK_ML_SHA256
+    "64cf795f3c0a7d26b87846330337594a70cffd95a8b02a876fa80b94e08ad82a"
+)
 set(WINDOWSAPPSDK_FOUNDATION_VERSION "1.8.260222000")
+set(WINDOWSAPPSDK_FOUNDATION_SHA256
+    "6a4df6ffc0d5f1a780112a8f781976e5aea6ebbe8c66abaad4ba8cc842854562"
+)
 
 include(${CMAKE_CURRENT_LIST_DIR}/DownloadNuGet.cmake)
 set(SDK_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/sdk")
@@ -25,10 +31,20 @@ set(SDK_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/sdk")
 file(MAKE_DIRECTORY "${SDK_LOCATION}")
 
 # Download the ML package (contains ONNX Runtime)
-download_nuget_package(Microsoft.WindowsAppSDK.ML ${WINDOWSAPPSDK_ML_VERSION} "${SDK_LOCATION}")
+download_nuget_package(
+    Microsoft.WindowsAppSDK.ML
+    ${WINDOWSAPPSDK_ML_VERSION}
+    ${WINDOWSAPPSDK_ML_SHA256}
+    "${SDK_LOCATION}"
+)
 
 # Download the Foundation package (contains bootstrapper)
-download_nuget_package(Microsoft.WindowsAppSDK.Foundation ${WINDOWSAPPSDK_FOUNDATION_VERSION} "${SDK_LOCATION}")
+download_nuget_package(
+    Microsoft.WindowsAppSDK.Foundation
+    ${WINDOWSAPPSDK_FOUNDATION_VERSION}
+    ${WINDOWSAPPSDK_FOUNDATION_SHA256}
+    "${SDK_LOCATION}"
+)
 
 message(STATUS "Windows App SDK packages ready in ${SDK_LOCATION}")
 

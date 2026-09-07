@@ -292,6 +292,9 @@ Windows ARM64 or `mac-arm64` on macOS ARM64.
 
 ## Acknowledgments
 
+- The included test clips are derived from the
+	[Microsoft Video Conferencing Dataset (VCD)](https://github.com/microsoft/VCD). See the
+	[clip provenance and license](data/test_data/clips/README.md).
 - Entropy coding implementation adapted from [ryg_rans](https://github.com/rygorous/ryg_rans).
 
 ## Contributing

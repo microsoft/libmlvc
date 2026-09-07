@@ -2,9 +2,9 @@
 # Licensed under the MIT License.
 
 # NuGet package helper for standalone builds.
-# Usage: download_nuget_package(PACKAGE_NAME VERSION OUTPUT_DIR)
+# Usage: download_nuget_package(PACKAGE_NAME VERSION EXPECTED_SHA256 OUTPUT_DIR)
 
-function(download_nuget_package PACKAGE_NAME VERSION OUTPUT_DIR)
+function(download_nuget_package PACKAGE_NAME VERSION EXPECTED_SHA256 OUTPUT_DIR)
     set(PACKAGE_URL
         "https://www.nuget.org/api/v2/package/${PACKAGE_NAME}/${VERSION}"
     )
@@ -17,8 +17,10 @@ function(download_nuget_package PACKAGE_NAME VERSION OUTPUT_DIR)
         file(
             DOWNLOAD "${PACKAGE_URL}"
             "${CMAKE_CURRENT_BINARY_DIR}/${PACKAGE_NAME}.nupkg"
+            EXPECTED_HASH "SHA256=${EXPECTED_SHA256}"
             SHOW_PROGRESS
             STATUS DOWNLOAD_STATUS
+            TLS_VERIFY ON
         )
 
         list(GET DOWNLOAD_STATUS 0 STATUS_CODE)

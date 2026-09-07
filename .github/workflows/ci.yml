@@ -47,12 +47,14 @@ jobs:
           - preset: win-x64
             runner: windows-2025-vs2026
             runtime_arch: x64
+            runtime_sha256: d20630d3078ea1514fb2d1fbe827254f04af49d86502ace8ecfda626a8631192
             release_test_args: >-
               -R "^(UnitTest|ManagerTests|CodecFeatureTests)"
               -E "^CodecFeatureTests[.](TemporalLayers_(2Layer|Decode_TL0_Only|.*Recovery|ProactiveLtr)|QpEnhancementLayer|IframePeriod|(Idr|Ltr|Proactive|External|Single|Multiple).*)$"
           - preset: win-arm64
             runner: windows-11-vs2026-arm
             runtime_arch: arm64
+            runtime_sha256: 1a92653a08aeef382340dbc953249342a2a8516b97cf48ac3938f77dcf495b1b
             release_test_args: >-
               -R "^(UnitTest|ManagerTests|CodecFeatureTests)"
               -E "^CodecFeatureTests[.](TemporalLayers_(2Layer|Decode_TL0_Only|.*Recovery|ProactiveLtr)|QpEnhancementLayer|IframePeriod|(Idr|Ltr|Proactive|External|Single|Multiple).*)$"
@@ -74,6 +76,11 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP WindowsAppRuntimeInstall.exe
           $uri = "https://aka.ms/windowsappsdk/1.8/$env:WINDOWS_APP_RUNTIME_VERSION/windowsappruntimeinstall-${{ matrix.runtime_arch }}.exe"
           Invoke-WebRequest $uri -OutFile $installer
+          $expectedHash = "${{ matrix.runtime_sha256 }}"
+          $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Windows App Runtime installer hash mismatch: expected $expectedHash, got $actualHash"
+          }
           $process = Start-Process $installer -ArgumentList "--quiet" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Windows App Runtime installer failed: $($process.ExitCode)" }
       - name: Configure
@@ -104,9 +111,11 @@ jobs:
           - platform: win-x64
             runner: windows-2025-vs2026
             runtime_arch: x64
+            runtime_sha256: d20630d3078ea1514fb2d1fbe827254f04af49d86502ace8ecfda626a8631192
           - platform: win-arm64
             runner: windows-11-vs2026-arm
             runtime_arch: arm64
+            runtime_sha256: 1a92653a08aeef382340dbc953249342a2a8516b97cf48ac3938f77dcf495b1b
           - platform: mac-arm64
             runner: macos-26
 
@@ -124,6 +133,11 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP WindowsAppRuntimeInstall.exe
           $uri = "https://aka.ms/windowsappsdk/1.8/$env:WINDOWS_APP_RUNTIME_VERSION/windowsappruntimeinstall-${{ matrix.runtime_arch }}.exe"
           Invoke-WebRequest $uri -OutFile $installer
+          $expectedHash = "${{ matrix.runtime_sha256 }}"
+          $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Windows App Runtime installer hash mismatch: expected $expectedHash, got $actualHash"
+          }
           $process = Start-Process $installer -ArgumentList "--quiet" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Windows App Runtime installer failed: $($process.ExitCode)" }
 
