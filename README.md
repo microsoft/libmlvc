@@ -290,6 +290,10 @@ Windows ARM64 or `mac-arm64` on macOS ARM64.
 - [LTR design](docs/ltr-design.md)
 - [Benchmarks](docs/benchmarks.md)
 
+## Acknowledgments
+
+- Entropy coding implementation adapted from [ryg_rans](https://github.com/rygorous/ryg_rans).
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a

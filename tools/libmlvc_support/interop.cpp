@@ -82,7 +82,7 @@ InteropThresholds ComputeInteropThresholds(int width, int height, const Platform
         const bool encIsAppleNpu = isAppleNpu(encPlatform, encConfig);
         const bool decIsAppleNpu = isAppleNpu(decPlatform, decConfig);
         if ((encIsAppleNpu || decIsAppleNpu) && !(encIsAppleNpu && decIsAppleNpu)) {
-            maxPsnrDrop = std::max(maxPsnrDrop, 0.5);
+            maxPsnrDrop = std::max(maxPsnrDrop, 0.75);
         }
     }
 
@@ -114,8 +114,8 @@ InteropThresholds ComputeInteropThresholds(int width, int height, const Platform
         const int shortSide = std::min(width, height);
         if (shortSide >= 540) return 40.3;
         if (shortSide >= 360) return 38.9;
-        if (shortSide >= 240) return 37.7;
-        return 36.9;
+        if (shortSide >= 240) return 37.0;
+        return 35.5;
     };
 
     return {

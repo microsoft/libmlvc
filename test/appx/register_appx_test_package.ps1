@@ -17,6 +17,21 @@ $DisplayName = $ExeBase
 $AliasFullTrust = "app_${ExeBase}.exe"
 $AliasAppContainer = "app_${ExeBase}_ac.exe"
 
+# AppContainer cannot load package dependencies through symbolic links whose
+# targets are outside the package ACL. Materialize linked DLLs in the loose
+# package directory before registration.
+Get-ChildItem -Path $ExeDir -Filter '*.dll' -File | Where-Object LinkType | ForEach-Object {
+  $LinkPath = $_.FullName
+  $TargetPath = $_.Target | Select-Object -First 1
+  if (-not [IO.Path]::IsPathRooted($TargetPath)) {
+    $TargetPath = Join-Path $_.DirectoryName $TargetPath
+  }
+  $TargetPath = (Resolve-Path $TargetPath).Path
+  Write-Host "Materializing linked dependency $($_.Name) from $TargetPath"
+  Remove-Item -LiteralPath $LinkPath -Force
+  Copy-Item -LiteralPath $TargetPath -Destination $LinkPath
+}
+
 $PlaceholderLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
 $AssetsDir = Join-Path $ExeDir 'Assets'
 New-Item -ItemType Directory -Force $AssetsDir | Out-Null
@@ -31,6 +46,11 @@ $Manifest = (Get-Content "$PSScriptRoot\AppxManifest.template.xml" -Raw) `
 
 $ManifestPath = Join-Path $ExeDir 'AppxManifest.xml'
 Set-Content -Path $ManifestPath -Value $Manifest -Encoding UTF8
+$ExistingPackage = Get-AppxPackage -Name $PackageName
+if ($ExistingPackage) {
+  Write-Host "Removing existing registration for $PackageName"
+  $ExistingPackage | Remove-AppxPackage
+}
 Add-AppxPackage -Register $ManifestPath -ForceApplicationShutdown
 
 # Grant AppContainer read access to model bundles and test data. S-1-15-2-1/2 = ALL [RESTRICTED] APPLICATION PACKAGES.

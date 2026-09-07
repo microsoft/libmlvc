@@ -175,6 +175,12 @@ std::filesystem::path MlvcManagerImpl::GetDefaultModelBundlesDir()
     return std::filesystem::path{ "./data/model_bundles" };
 }
 
+MlvcVersion MlvcManagerImpl::GetDefaultModelVersion()
+{
+    // Return the default model version. This is the version that will be used if no version is specified
+    return { 0, 1 };
+}
+
 MlvcManagerImpl::MlvcManagerImpl(const ManagerParams& params)
     : m_params(params)
     , m_info{

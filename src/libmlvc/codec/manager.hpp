@@ -24,11 +24,7 @@ class MlvcDecoderImpl;
 class MlvcManagerImpl : public std::enable_shared_from_this<MlvcManagerImpl> {
 public:
     static std::filesystem::path GetDefaultModelBundlesDir();
-    static MlvcVersion GetDefaultModelVersion()
-    {
-        // Return the default model version. This is the version that will be used if no version is specified
-        return { 0, 1 };
-    }
+    static MlvcVersion GetDefaultModelVersion();
 
     MlvcManagerImpl(const ManagerParams& params);
     MlvcManagerImpl(const MlvcManagerImpl&) = delete;

@@ -79,8 +79,11 @@ if(NOT BUILD_SHARED_LIBS)
     target_include_directories(gtest_libmlvc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 endif()
 
+# ---------------------------------------------------------------------------
+# Build-tree runtime support
+# ---------------------------------------------------------------------------
+
 if(WIN32)
-    # Copy runtime DLLs next to the exe so it can run directly from the build dir
     add_custom_command(
         TARGET gtest_libmlvc
         POST_BUILD
@@ -94,3 +97,4 @@ if(WIN32)
         VERBATIM
     )
 endif()
+

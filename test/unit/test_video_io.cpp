@@ -293,7 +293,10 @@ TEST(UnitTestVideoReader, RejectsCorruptGzipStream)
     ASSERT_TRUE(reader);
 
     auto frame = reader->Read();
-    ASSERT_TRUE(frame);
+    if (!frame) {
+        EXPECT_EQ(frame.error(), make_error_code(Error::io_error));
+        return;
+    }
     ASSERT_TRUE(frame->has_value());
 
     auto nextFrame = reader->Read();

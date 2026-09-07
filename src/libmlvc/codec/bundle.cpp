@@ -80,6 +80,21 @@ bool IsBundleCompatible(const BundleManifest& manifest, const InferenceEngineInf
     return true;  // For other cases, assume compatible
 }
 
+int GetBundlePriority(const TargetDevice targetDevice)
+{
+    switch (targetDevice) {
+    case TargetDevice::GENERIC:
+        return 3;
+    case TargetDevice::QUALCOMM:
+        return 2;
+    case TargetDevice::INTEL:
+        return 1;
+    case TargetDevice::APPLE:
+        return 0;
+    }
+    return 0;
+}
+
 expected<void> WarmUpSession(const InferenceSessionPtr& session)
 {
     auto inputNames = session->GetInputNames();
@@ -135,7 +150,6 @@ public:
     }
     const BundleManifest& GetManifest() const { return m_manifest; }
     std::vector<std::byte> TakeData() { return std::move(m_data); }
-    int GetPriority() const { return static_cast<int>(m_manifest.targetDevice); }
 
 private:
     BundleManifest m_manifest;
@@ -191,7 +205,7 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
         // If there are multiple bundles with the same version, keep the one with the largest priority
         if (bundlesMap.contains(manifest.mlvcVersion)) {
             const auto& existingBundle = bundlesMap.at(manifest.mlvcVersion);
-            if (existingBundle.GetPriority() >= bundle.value().GetPriority()) {
+            if (GetBundlePriority(existingBundle.GetManifest().targetDevice) >= GetBundlePriority(manifest.targetDevice)) {
                 MLVC_LOG_DEBUG("Bundle %s has same version as previously found bundle but smaller priority, skipping",
                                entry.path().filename().string().c_str());
                 continue;

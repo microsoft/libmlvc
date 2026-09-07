@@ -490,7 +490,13 @@ private:
         const auto encoderFeature = encoderCore.GetModelOutputs().feature.Data();
         const auto decoderFeature = decoderCore.GetModelOutputs().feature.Data();
         ASSERT_EQ(encoderFeature.size(), decoderFeature.size()) << "Feature size mismatch at frame " << frameId;
-        EXPECT_TRUE(std::ranges::equal(encoderFeature, decoderFeature)) << "Reference buffer drift at frame " << frameId;
+        // Treat FP16 positive and negative zero as equal; all other values remain bit-exact.
+        constexpr auto fp16ValuesEqual = [](const mlvc_f16_t lhs, const mlvc_f16_t rhs) {
+            constexpr mlvc_f16_t magnitudeMask = 0x7FFF;
+            return lhs == rhs || ((lhs & magnitudeMask) == 0 && (rhs & magnitudeMask) == 0);
+        };
+        EXPECT_TRUE(std::ranges::equal(encoderFeature, decoderFeature, fp16ValuesEqual))
+            << "Reference buffer drift at frame " << frameId;
     }
 
     const CodecFeatureTestParams m_params;

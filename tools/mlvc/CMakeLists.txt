@@ -1,6 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+# ---------------------------------------------------------------------------
+# Tool executable
+# ---------------------------------------------------------------------------
+
 add_executable(mlvc)
 target_sources(
     mlvc
@@ -15,20 +19,35 @@ target_sources(
 )
 target_link_libraries(mlvc PRIVATE libmlvc libmlvc_support Boost::json)
 
+# ---------------------------------------------------------------------------
+# Build-tree runtime support
+# ---------------------------------------------------------------------------
+
+set(MLVC_TOOL_RUNTIME_FILES)
 if(WIN32)
-    # Copy runtime DLLs next to the exe so it can run directly from the build dir
+    list(
+        APPEND MLVC_TOOL_RUNTIME_FILES
+        "$<TARGET_RUNTIME_DLLS:mlvc>"
+        "$<TARGET_PROPERTY:mlvc,LIBMLVC_RUNTIME_FILES>"
+    )
+endif()
+
+if(MLVC_TOOL_RUNTIME_FILES)
     add_custom_command(
         TARGET mlvc
         POST_BUILD
         COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_PROPERTY:libmlvc,LIBMLVC_RUNTIME_FILES>"
-            "$<TARGET_RUNTIME_DLLS:mlvc>" "$<TARGET_FILE_DIR:mlvc>"
+            ${CMAKE_COMMAND} -E copy_if_different "${MLVC_TOOL_RUNTIME_FILES}"
+            "$<TARGET_FILE_DIR:mlvc>"
         COMMAND_EXPAND_LISTS
-        COMMENT "Copying runtime DLLs next to mlvc"
+        COMMENT "Copying runtime libraries next to mlvc"
         VERBATIM
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
 
 if(PROJECT_IS_TOP_LEVEL)
     install(TARGETS mlvc)

@@ -11,10 +11,12 @@
 
 #include <libmlvc/platform_info.hpp>
 
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -317,15 +319,19 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
 
         std::string hwId;
         const char* luidStr = nullptr;
+        const char* highPerformanceIndexStr = nullptr;
         if (hwDevice) {
             auto vendor = Uint32ToHexTag(m_ortApi->HardwareDevice_VendorId(hwDevice));
             if (!vendor.empty() && vendor[0] != '\0') {
                 hwId = vendor + ":" + Uint32ToHexTag(m_ortApi->HardwareDevice_DeviceId(hwDevice));
             }
-            luidStr = FindOrtKvpValue(m_ortApi, m_ortApi->HardwareDevice_Metadata(hwDevice), "LUID");
+            const auto* metadata = m_ortApi->HardwareDevice_Metadata(hwDevice);
+            luidStr = FindOrtKvpValue(m_ortApi, metadata, "LUID");
+            highPerformanceIndexStr = FindOrtKvpValue(m_ortApi, metadata, "DxgiHighPerformanceIndex");
         }
-        MLVC_LOG_INFO("  [%zu] %s (%s, %s, v%s, luid=%s)", i, epName ? epName : "(null)", deviceTypeStr,
-                      hwId.empty() ? "N/A" : hwId.c_str(), version ? version : "N/A", luidStr ? luidStr : "N/A");
+        MLVC_LOG_INFO("  [%zu] %s (%s, %s, v%s, luid=%s, dxgi_high_performance_index=%s)", i, epName ? epName : "(null)",
+                      deviceTypeStr, hwId.empty() ? "N/A" : hwId.c_str(), version ? version : "N/A",
+                      luidStr ? luidStr : "N/A", highPerformanceIndexStr ? highPerformanceIndexStr : "N/A");
     }
 
     // Resolve compute unit (AUTO -> NPU) before device selection
@@ -333,15 +339,33 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
 
     // Select EP device matching provider name and preferred hardware device type
     const auto preferredHwType = ComputeUnitToHardwareDeviceType(resolvedComputeUnit);
+    const auto getPerformanceIndex = [&](const OrtHardwareDevice* hwDevice) {
+        if (preferredHwType != OrtHardwareDeviceType_GPU) return 0;
+
+        int value = std::numeric_limits<int>::max();
+        const char* str =
+            FindOrtKvpValue(m_ortApi, m_ortApi->HardwareDevice_Metadata(hwDevice), "DxgiHighPerformanceIndex");
+        if (str) {
+            const char* end = str + std::strlen(str);
+            const auto [ptr, ec] = std::from_chars(str, end, value);
+            if (ec != std::errc{} || ptr != end || value < 0) value = std::numeric_limits<int>::max();
+        }
+        return value;
+    };
+
     int epDeviceIndex = -1;
+    int bestPerformanceIndex = std::numeric_limits<int>::max();
     for (size_t i = 0; i < numEpDevices; i++) {
         const char* epName = m_ortApi->EpDevice_EpName(epDevices[i]);
         if (epName && std::strcmp(epName, ortProviderName) == 0) {
             const auto* hwDevice = m_ortApi->EpDevice_Device(epDevices[i]);
             const auto hwType = hwDevice ? m_ortApi->HardwareDevice_Type(hwDevice) : OrtHardwareDeviceType_CPU;
             if (hwType == preferredHwType) {
-                epDeviceIndex = static_cast<int>(i);
-                break;
+                const auto performanceIndex = getPerformanceIndex(hwDevice);
+                if (epDeviceIndex < 0 || performanceIndex < bestPerformanceIndex) {
+                    epDeviceIndex = static_cast<int>(i);
+                    bestPerformanceIndex = performanceIndex;
+                }
             }
         }
     }
