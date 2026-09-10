@@ -1,0 +1,187 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  WINDOWS_APP_RUNTIME_VERSION: 1.8.260804001
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    name: Pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run pre-commit
+        run: pipx run --spec pre-commit==4.6.1 pre-commit run --all-files --show-diff-on-failure
+
+  build:
+    name: Build (${{ matrix.preset }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      LIBMLVC_TEST_COMPUTE_UNIT: cpu
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: win-x64
+            runner: windows-2025-vs2026
+            runtime_arch: x64
+            runtime_sha256: d20630d3078ea1514fb2d1fbe827254f04af49d86502ace8ecfda626a8631192
+            release_test_args: >-
+              -R "^(UnitTest|ManagerTests|CodecFeatureTests)"
+              -E "^CodecFeatureTests[.](TemporalLayers_(2Layer|Decode_TL0_Only|.*Recovery|ProactiveLtr)|QpEnhancementLayer|IframePeriod|(Idr|Ltr|Proactive|External|Single|Multiple).*)$"
+          - preset: win-arm64
+            runner: windows-11-vs2026-arm
+            runtime_arch: arm64
+            runtime_sha256: 1a92653a08aeef382340dbc953249342a2a8516b97cf48ac3938f77dcf495b1b
+            release_test_args: >-
+              -R "^(UnitTest|ManagerTests|CodecFeatureTests)"
+              -E "^CodecFeatureTests[.](TemporalLayers_(2Layer|Decode_TL0_Only|.*Recovery|ProactiveLtr)|QpEnhancementLayer|IframePeriod|(Idr|Ltr|Proactive|External|Single|Multiple).*)$"
+          - preset: mac-arm64
+            runner: macos-26
+            release_test_args: >-
+              -R "^(UnitTest|ManagerTests|CodecFeatureTests|ValidationTests[.]DefaultConfig_320x180)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Install Windows App Runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP WindowsAppRuntimeInstall.exe
+          $uri = "https://aka.ms/windowsappsdk/1.8/$env:WINDOWS_APP_RUNTIME_VERSION/windowsappruntimeinstall-${{ matrix.runtime_arch }}.exe"
+          Invoke-WebRequest $uri -OutFile $installer
+          $expectedHash = "${{ matrix.runtime_sha256 }}"
+          $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Windows App Runtime installer hash mismatch: expected $expectedHash, got $actualHash"
+          }
+          $process = Start-Process $installer -ArgumentList "--quiet" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Windows App Runtime installer failed: $($process.ExitCode)" }
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build Debug
+        run: cmake --build --preset ${{ matrix.preset }}-debug
+      - name: Test Debug
+        run: ctest --preset ${{ matrix.preset }}-debug -R "^UnitTest"
+      - name: Build Release
+        run: cmake --build --preset ${{ matrix.preset }}-release
+      - name: Test Release
+        run: ctest --preset ${{ matrix.preset }}-release ${{ matrix.release_test_args }}
+
+  examples:
+    name: Examples (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg
+      LIBMLVC_SOURCE_PATH: ${{ github.workspace }}
+      VCPKG_KEEP_ENV_VARS: LIBMLVC_SOURCE_PATH
+      VCPKG_BINARY_SOURCES: clear
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win-x64
+            runner: windows-2025-vs2026
+            runtime_arch: x64
+            runtime_sha256: d20630d3078ea1514fb2d1fbe827254f04af49d86502ace8ecfda626a8631192
+          - platform: win-arm64
+            runner: windows-11-vs2026-arm
+            runtime_arch: arm64
+            runtime_sha256: 1a92653a08aeef382340dbc953249342a2a8516b97cf48ac3938f77dcf495b1b
+          - platform: mac-arm64
+            runner: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Install Windows App Runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP WindowsAppRuntimeInstall.exe
+          $uri = "https://aka.ms/windowsappsdk/1.8/$env:WINDOWS_APP_RUNTIME_VERSION/windowsappruntimeinstall-${{ matrix.runtime_arch }}.exe"
+          Invoke-WebRequest $uri -OutFile $installer
+          $expectedHash = "${{ matrix.runtime_sha256 }}"
+          $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Windows App Runtime installer hash mismatch: expected $expectedHash, got $actualHash"
+          }
+          $process = Start-Process $installer -ArgumentList "--quiet" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Windows App Runtime installer failed: $($process.ExitCode)" }
+
+      - name: Configure static FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --preset ${{ matrix.platform }}-static -DFETCHCONTENT_SOURCE_DIR_LIBMLVC="${{ github.workspace }}"
+      - name: Build static FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --build --preset ${{ matrix.platform }}-static-release
+      - name: Run static FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: ./build/${{ matrix.platform }}-static/Release/libmlvc_example "${{ github.workspace }}/data/model_bundles" cpu
+      - name: Configure shared FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --preset ${{ matrix.platform }}-shared -DFETCHCONTENT_SOURCE_DIR_LIBMLVC="${{ github.workspace }}"
+      - name: Build shared FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: cmake --build --preset ${{ matrix.platform }}-shared-release
+      - name: Run shared FetchContent example
+        working-directory: examples/minimal-fetchcontent
+        run: ./build/${{ matrix.platform }}-shared/Release/libmlvc_example "${{ github.workspace }}/data/model_bundles" cpu
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: 8128322a87623426aea726c44ea45ee7e77daaa8
+          path: .vcpkg
+          persist-credentials: false
+      - name: Configure static vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --preset ${{ matrix.platform }}-static
+      - name: Build static vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --build --preset ${{ matrix.platform }}-static-release
+      - name: Run static vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: ./build/${{ matrix.platform }}-static/Release/libmlvc_example "${{ github.workspace }}/data/model_bundles" cpu
+      - name: Configure shared vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --preset ${{ matrix.platform }}-shared
+      - name: Build shared vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: cmake --build --preset ${{ matrix.platform }}-shared-release
+      - name: Run shared vcpkg example
+        working-directory: examples/minimal-vcpkg
+        run: ./build/${{ matrix.platform }}-shared/Release/libmlvc_example "${{ github.workspace }}/data/model_bundles" cpu
