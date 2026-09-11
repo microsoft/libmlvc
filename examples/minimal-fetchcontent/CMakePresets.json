@@ -1,0 +1,155 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 30,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "win-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "win-x64-base",
+      "hidden": true,
+      "architecture": "x64"
+    },
+    {
+      "name": "win-arm64-base",
+      "hidden": true,
+      "architecture": "ARM64"
+    },
+    {
+      "name": "static-base",
+      "hidden": true,
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "OFF"
+      }
+    },
+    {
+      "name": "shared-base",
+      "hidden": true,
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "ON"
+      }
+    },
+    {
+      "name": "win-x64-static",
+      "inherits": ["win-base", "win-x64-base", "static-base"],
+      "displayName": "Windows x64 static"
+    },
+    {
+      "name": "win-x64-shared",
+      "inherits": ["win-base", "win-x64-base", "shared-base"],
+      "displayName": "Windows x64 shared"
+    },
+    {
+      "name": "win-arm64-static",
+      "inherits": ["win-base", "win-arm64-base", "static-base"],
+      "displayName": "Windows ARM64 static"
+    },
+    {
+      "name": "win-arm64-shared",
+      "inherits": ["win-base", "win-arm64-base", "shared-base"],
+      "displayName": "Windows ARM64 shared"
+    },
+    {
+      "name": "mac-arm64-base",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Xcode",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "mac-arm64-static",
+      "inherits": ["mac-arm64-base", "static-base"],
+      "displayName": "macOS ARM64 static"
+    },
+    {
+      "name": "mac-arm64-shared",
+      "inherits": ["mac-arm64-base", "shared-base"],
+      "displayName": "macOS ARM64 shared"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "win-x64-static-debug",
+      "configurePreset": "win-x64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-x64-static-release",
+      "configurePreset": "win-x64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-x64-shared-debug",
+      "configurePreset": "win-x64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-x64-shared-release",
+      "configurePreset": "win-x64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-static-debug",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-static-release",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-shared-debug",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-shared-release",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "mac-arm64-static-debug",
+      "configurePreset": "mac-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mac-arm64-static-release",
+      "configurePreset": "mac-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "mac-arm64-shared-debug",
+      "configurePreset": "mac-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mac-arm64-shared-release",
+      "configurePreset": "mac-arm64-shared",
+      "configuration": "Release"
+    }
+  ]
+}

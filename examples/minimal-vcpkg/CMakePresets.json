@@ -1,0 +1,154 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 30,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+    },
+    {
+      "name": "win-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "win-x64-static",
+      "inherits": "win-base",
+      "displayName": "Windows x64 static",
+      "architecture": "x64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
+      }
+    },
+    {
+      "name": "win-x64-shared",
+      "inherits": "win-base",
+      "displayName": "Windows x64 shared",
+      "architecture": "x64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "win-arm64-static",
+      "inherits": "win-base",
+      "displayName": "Windows ARM64 static",
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows-static-md"
+      }
+    },
+    {
+      "name": "win-arm64-shared",
+      "inherits": "win-base",
+      "displayName": "Windows ARM64 shared",
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows"
+      }
+    },
+    {
+      "name": "mac-arm64-base",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Xcode",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "mac-arm64-static",
+      "inherits": "mac-arm64-base",
+      "displayName": "macOS ARM64 static",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx"
+      }
+    },
+    {
+      "name": "mac-arm64-shared",
+      "inherits": "mac-arm64-base",
+      "displayName": "macOS ARM64 shared",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx-dynamic"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "win-x64-static-debug",
+      "configurePreset": "win-x64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-x64-static-release",
+      "configurePreset": "win-x64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-x64-shared-debug",
+      "configurePreset": "win-x64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-x64-shared-release",
+      "configurePreset": "win-x64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-static-debug",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-static-release",
+      "configurePreset": "win-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-arm64-shared-debug",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win-arm64-shared-release",
+      "configurePreset": "win-arm64-shared",
+      "configuration": "Release"
+    },
+    {
+      "name": "mac-arm64-static-debug",
+      "configurePreset": "mac-arm64-static",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mac-arm64-static-release",
+      "configurePreset": "mac-arm64-static",
+      "configuration": "Release"
+    },
+    {
+      "name": "mac-arm64-shared-debug",
+      "configurePreset": "mac-arm64-shared",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mac-arm64-shared-release",
+      "configurePreset": "mac-arm64-shared",
+      "configuration": "Release"
+    }
+  ]
+}
