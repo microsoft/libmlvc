@@ -227,7 +227,7 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
     const char* ortVersion = ortApiBase->GetVersionString();
     m_ortApi = ortApiBase->GetApi(ORT_API_VERSION);
     if (!m_ortApi) {
-        MLVC_LOG_ERROR("Failed to get OrtApi for version %u", ORT_API_VERSION);
+        MLVC_LOG_ERROR("Failed to get OrtApi for version %d", ORT_API_VERSION);
         m_hOnnxRuntime.reset();
         return make_error_code(Error::model_init_error);
     }
@@ -284,9 +284,9 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
 
         // Emit EP info once readiness is established.
         if (progressCallback) {
-            progressCallback(WindowsAppRuntimeEPInfoAvailable{
-                .version = epCatalogPackageVersion.empty() ? "unavailable" : epCatalogPackageVersion,
-                .downloadTimeMs = ret->downloadTimeMs });
+            progressCallback(WindowsAppRuntimeEPInfoAvailable{ .provider = m_params.onnxExecutionProvider,
+                                                               .epPackageVersion = epCatalogPackageVersion,
+                                                               .downloadTimeMs = ret->downloadTimeMs });
             if (cancelToken.IsCancelled()) {
                 MLVC_LOG_INFO("Initialization cancelled by caller after execution provider version discovery");
                 return make_error_code(Error::operation_cancelled);

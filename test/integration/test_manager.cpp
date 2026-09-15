@@ -250,7 +250,8 @@ TEST_F(ManagerTests, GetAvailableVersions)
         } else if (const auto* appRuntimeVersion = std::get_if<libmlvc::WindowsAppRuntimeVersionAvailable>(&event)) {
             std::cerr << "Init progress apprtversion: Windows App Runtime v" << appRuntimeVersion->version << '\n';
         } else if (const auto* epInfo = std::get_if<libmlvc::WindowsAppRuntimeEPInfoAvailable>(&event)) {
-            std::cerr << "Init progress apprtepversion: Windows Execution Provider v" << epInfo->version << '\n';
+            std::cerr << "Init progress apprtepversion: Windows Execution Provider "
+                      << OnnxExecutionProviderToString(epInfo->provider) << " v" << epInfo->epPackageVersion << '\n';
         }
     };
 

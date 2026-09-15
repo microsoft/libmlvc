@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -40,8 +41,8 @@ void StdoutLogHandler(LogLevel level, const std::source_location& loc, std::stri
     for (const char* p = loc.file_name(); *p; ++p)
         if (*p == '/' || *p == '\\') basename = p + 1;
 
-    std::fprintf(stdout, "%s [%5s][%s:%d]: %.*s\n", ss.str().c_str(), LogLevelToString(level), basename, loc.line(),
-                 static_cast<int>(msg.size()), msg.data());
+    std::fprintf(stdout, "%s [%5s][%s:%u]: %.*s\n", ss.str().c_str(), LogLevelToString(level), basename,
+                 static_cast<unsigned>(loc.line()), static_cast<int>(msg.size()), msg.data());
 }
 
 TEST(BENCHMARKS, Run)

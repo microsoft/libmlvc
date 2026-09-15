@@ -132,7 +132,7 @@ expected<Tensor<T, N>> IInferenceTensor::View()
         tensorShape[N - i - 1] = shape.value()[shape.value().size() - 1 - i];
         tensorStrides[N - i - 1] = strides.value()[strides.value().size() - 1 - i];
     }
-    const size_t tensorSize = tensorShape[0] * tensorStrides[0];
+    const size_t tensorSize = static_cast<size_t>(tensorShape[0]) * tensorStrides[0];
     const std::span<T> tensorData{ reinterpret_cast<T*>(data.value().data()), tensorSize };
     return Tensor<T, N>{ tensorShape, tensorStrides, tensorData, name.value() };
 }

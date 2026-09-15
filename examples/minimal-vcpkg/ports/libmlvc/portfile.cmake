@@ -7,8 +7,8 @@ else()
     vcpkg_from_git(
         OUT_SOURCE_PATH SOURCE_PATH
         URL https://github.com/microsoft/libmlvc.git
-        # TODO: Update to the first public source commit.
-        REF 00e3fb60f2d5b240bd701a6492a2b88408ad47a8
+        # NB: update this SHA to the libmlvc commit you want to build
+        REF 104d6f7dc5a71044b81425751ac40b2747fb0c71
         FETCH_REF main
         HEAD_REF main
     )

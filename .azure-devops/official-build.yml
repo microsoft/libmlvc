@@ -1,0 +1,82 @@
+trigger:
+  - main
+pr:
+  - '*'
+
+resources:
+  repositories:
+    - repository: ic3Pipelines
+      type: git
+      name: ES/internal_build_ic3pt
+      ref: refs/tags/release
+
+extends:
+  template: v1/IC3.Official.PipelineTemplate.yml@ic3Pipelines
+  parameters:
+    serviceTreeId: 'a1984786-4804-42cd-b1a8-65accf2efbeb'
+    pool:
+      name: ess-1eshp-windows-latest
+      os: windows
+    stages:
+      - stage: Build
+        displayName: Windows x64 build
+        jobs:
+          - job: Windows_x64
+            displayName: Build Release
+            timeoutInMinutes: 60
+            variables:
+              X_VCPKG_ASSET_SOURCES: 'clear;x-azurl,https://vcpkg.storage.devpackages.microsoft.io/artifacts/;x-block-origin'
+            templateContext:
+              outputs:
+                - output: pipelineArtifact
+                  targetPath: $(Build.ArtifactStagingDirectory)/native
+                  artifactName: libmlvc-win-x64-release
+            steps:
+              - checkout: self
+                clean: true
+                fetchDepth: 1
+              - task: NuGetToolInstaller@1
+                inputs:
+                  versionSpec: 6.x
+                displayName: Use NuGet 6
+              - task: NuGetAuthenticate@1
+                displayName: Authenticate NuGet to Azure Artifacts
+              - task: NuGetCommand@2
+                displayName: Restore Windows App SDK packages
+                inputs:
+                  command: restore
+                  restoreSolution: $(Build.SourcesDirectory)/.azure-devops/packages.config
+                  feedsToUse: config
+                  nugetConfigPath: $(Build.SourcesDirectory)/.azure-devops/nuget.config
+                  restoreDirectory: $(Build.SourcesDirectory)/build/win-x64/sdk
+                  noCache: true
+              - pwsh: >-
+                  cmake --preset win-x64
+                  -DLIBMLVC_ALLOW_NUGET_DOWNLOADS=OFF
+                  -DLIBMLVC_ALLOW_VCPKG_DOWNLOADS=OFF
+                  -DLIBMLVC_BUILD_TESTS=OFF
+                  -DBUILD_SHARED_LIBS=OFF
+                  -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+                  "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/INCREMENTAL:NO /DEBUG:FULL /OPT:REF /OPT:ICF"
+                displayName: Configure Release with symbols
+              - pwsh: cmake --build --preset win-x64-release --parallel
+                displayName: Build Release
+              - pwsh: |
+                  $buildDirectory = Join-Path $env:BUILD_SOURCESDIRECTORY 'build/win-x64'
+                  $artifactDirectory = Join-Path $env:BUILD_ARTIFACTSTAGINGDIRECTORY 'native'
+                  $sourceFiles = @(
+                    'src/Release/mlvc.lib'
+                    'tools/mlvc/Release/mlvc.exe'
+                    'tools/mlvc/Release/mlvc.pdb'
+                  ) | ForEach-Object { Join-Path $buildDirectory $_ }
+                  foreach ($sourceFile in $sourceFiles) {
+                    if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
+                      throw "Missing build output: $sourceFile"
+                    }
+                    if ((Get-Item -LiteralPath $sourceFile).Length -eq 0) {
+                      throw "Empty build output: $sourceFile"
+                    }
+                  }
+                  New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+                  Copy-Item -LiteralPath $sourceFiles -Destination $artifactDirectory -ErrorAction Stop
+                displayName: Stage native analysis inputs

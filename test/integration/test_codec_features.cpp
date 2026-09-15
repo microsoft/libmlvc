@@ -50,13 +50,17 @@ Nv12Frame CropNv12Frame(const Nv12Frame& src, const int dstWidth, const int dstH
     const auto* srcUv = src.data.data() + static_cast<size_t>(src.width) * src.height;
 
     for (int y = 0; y < dstHeight; y++) {
-        std::memcpy(&dst.data[y * dstWidth], &srcY[(y + offsetY) * src.width + offsetX], dstWidth);
+        const size_t dstOffset = static_cast<size_t>(y) * dstWidth;
+        const size_t srcOffset = (static_cast<size_t>(y) + offsetY) * src.width + offsetX;
+        std::memcpy(&dst.data[dstOffset], &srcY[srcOffset], dstWidth);
     }
 
     const int uvOffsetX = offsetX;
     const int uvOffsetY = offsetY / 2;
     for (int y = 0; y < dstHeight / 2; y++) {
-        std::memcpy(&dst.data[dstYSize + y * dstWidth], &srcUv[(y + uvOffsetY) * src.width + uvOffsetX], dstWidth);
+        const size_t dstOffset = dstYSize + static_cast<size_t>(y) * dstWidth;
+        const size_t srcOffset = (static_cast<size_t>(y) + uvOffsetY) * src.width + uvOffsetX;
+        std::memcpy(&dst.data[dstOffset], &srcUv[srcOffset], dstWidth);
     }
 
     return dst;

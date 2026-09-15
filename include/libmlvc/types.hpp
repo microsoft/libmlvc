@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -327,45 +328,6 @@ struct DecoderStats {
 // Manager types
 // --------------------------------------------------------------------------------------
 
-/// Copyable token used to cancel manager creation; copies share cancellation state.
-/// Cancellation takes effect at the next check between initialization steps.
-class CancelToken {
-public:
-    CancelToken() : m_flag(std::make_shared<std::atomic<bool>>(false)) {}
-    void Cancel() noexcept { m_flag->store(true, std::memory_order_release); }
-    [[nodiscard]] bool IsCancelled() const noexcept { return m_flag->load(std::memory_order_acquire); }
-
-private:
-    std::shared_ptr<std::atomic<bool>> m_flag;
-};
-
-/// Human-readable initialization progress update.
-struct StatusMessage {
-    std::string message;
-};
-
-/// Windows App Runtime version discovered during Windows ML initialization.
-struct WindowsAppRuntimeVersionAvailable {
-    std::string version;
-};
-
-/// Windows execution-provider package information discovered during initialization.
-struct WindowsAppRuntimeEPInfoAvailable {
-    std::string version;
-    std::optional<uint32_t> downloadTimeMs;  ///< Download duration in milliseconds, when measured.
-};
-
-/// Platform-dependent initialization progress event.
-using InitializeProgressEvent =
-    std::variant<StatusMessage, WindowsAppRuntimeVersionAvailable, WindowsAppRuntimeEPInfoAvailable>;
-
-/// Callback receiving initialization progress events.
-///
-/// During a Windows execution-provider download, calls may arrive on a WinML worker thread; otherwise
-/// they run on the thread creating the manager. All calls finish before manager creation returns.
-/// The callback must be safe to call from either thread and must not throw.
-using InitializeProgressCallback = std::function<void(const InitializeProgressEvent& event)>;
-
 /// Requested inference compute unit. Values are append-only.
 enum struct ComputeUnit {
     AUTO = 0,  ///< Resolves to NPU on supported platforms and GPU otherwise.
@@ -472,6 +434,48 @@ inline expected<WinMlInitMode> StringToWinMlInitMode(std::string_view value)
     }
     return make_error_code(Error::invalid_argument);
 }
+
+/// Copyable token used to cancel manager creation; copies share cancellation state.
+/// Cancellation takes effect at the next check between initialization steps.
+class CancelToken {
+public:
+    CancelToken() : m_flag(std::make_shared<std::atomic<bool>>(false)) {}
+    void Cancel() noexcept { m_flag->store(true, std::memory_order_release); }
+    [[nodiscard]] bool IsCancelled() const noexcept { return m_flag->load(std::memory_order_acquire); }
+
+private:
+    std::shared_ptr<std::atomic<bool>> m_flag;
+};
+
+/// Human-readable initialization progress update.
+struct StatusMessage {
+    std::string message;
+};
+
+/// Windows App Runtime version discovered during Windows ML initialization.
+struct WindowsAppRuntimeVersionAvailable {
+    std::string version;
+};
+
+/// Windows execution-provider package information discovered during initialization.
+/// Successful catalog-provider initialization emits this event when a callback is supplied, including
+/// when the provider is already installed.
+struct WindowsAppRuntimeEPInfoAvailable {
+    OnnxExecutionProvider provider{ OnnxExecutionProvider::CPU };
+    std::string epPackageVersion;
+    std::optional<uint32_t> downloadTimeMs;  ///< Download duration in milliseconds, when measured.
+};
+
+/// Platform-dependent initialization progress event.
+using InitializeProgressEvent =
+    std::variant<StatusMessage, WindowsAppRuntimeVersionAvailable, WindowsAppRuntimeEPInfoAvailable>;
+
+/// Callback receiving initialization progress events.
+///
+/// During a Windows execution-provider download, calls may arrive on a WinML worker thread; otherwise
+/// they run on the thread creating the manager. All calls finish before manager creation returns.
+/// The callback must be safe to call from either thread and must not throw.
+using InitializeProgressCallback = std::function<void(const InitializeProgressEvent& event)>;
 
 /// Parameters controlling manager and inference initialization.
 struct ManagerParams {

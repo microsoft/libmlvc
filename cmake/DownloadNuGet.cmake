@@ -4,6 +4,12 @@
 # NuGet package helper for standalone builds.
 # Usage: download_nuget_package(PACKAGE_NAME VERSION EXPECTED_SHA256 OUTPUT_DIR)
 
+option(
+    LIBMLVC_ALLOW_NUGET_DOWNLOADS
+    "Allow downloading missing NuGet packages"
+    ON
+)
+
 function(download_nuget_package PACKAGE_NAME VERSION EXPECTED_SHA256 OUTPUT_DIR)
     set(PACKAGE_URL
         "https://www.nuget.org/api/v2/package/${PACKAGE_NAME}/${VERSION}"
@@ -11,6 +17,12 @@ function(download_nuget_package PACKAGE_NAME VERSION EXPECTED_SHA256 OUTPUT_DIR)
     set(OUTPUT_PATH "${OUTPUT_DIR}/${PACKAGE_NAME}.${VERSION}")
 
     if(NOT EXISTS "${OUTPUT_PATH}")
+        if(NOT LIBMLVC_ALLOW_NUGET_DOWNLOADS)
+            message(
+                FATAL_ERROR
+                "NuGet package ${PACKAGE_NAME} ${VERSION} was not restored to ${OUTPUT_PATH}; downloads are disabled."
+            )
+        endif()
         message(STATUS "Downloading ${PACKAGE_NAME} ${VERSION}...")
 
         # Download the NuGet package

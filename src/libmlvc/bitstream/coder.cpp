@@ -443,7 +443,7 @@ expected<FrameHeader> NaluParser::ParseFrameHeader(BitReader& bitReader, const S
         if (!numLtrSlots) return numLtrSlots.error();
 
         if (numLtrSlots.value() > MAX_LTR_SLOTS) {
-            MLVC_LOG_ERROR("Number of LTR slots %u exceeds maximum %d", numLtrSlots.value(), MAX_LTR_SLOTS);
+            MLVC_LOG_ERROR("Number of LTR slots %d exceeds maximum %d", numLtrSlots.value(), MAX_LTR_SLOTS);
             return make_error_code(Error::bit_stream_unexpected_error);
         }
 

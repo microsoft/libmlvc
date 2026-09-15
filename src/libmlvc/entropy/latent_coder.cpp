@@ -88,12 +88,12 @@ expected<void> BitEstimatorBase::Initialize()
 
 void BitEstimatorBase::UpdateIndices(const std::array<int, 3>& shape, const int qp)
 {
-    const int h = shape[1];
-    const int w = shape[2];
-    m_indices.resize(shape[0] * h * w);
+    const size_t planeSize = static_cast<size_t>(shape[1]) * shape[2];
+    m_indices.resize(static_cast<size_t>(shape[0]) * planeSize);
     for (int ch = 0; ch < shape[0]; ch++) {
-        for (int i = 0; i < h * w; i++) {
-            m_indices[ch * h * w + i] = ch + qp * m_pmf->channels;
+        const size_t channelOffset = static_cast<size_t>(ch) * planeSize;
+        for (size_t index = 0; index < planeSize; index++) {
+            m_indices[channelOffset + index] = ch + qp * m_pmf->channels;
         }
     }
 }
