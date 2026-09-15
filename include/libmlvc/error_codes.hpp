@@ -8,6 +8,7 @@
 #include <libmlvc/export.hpp>
 
 #include <system_error>
+#include <type_traits>
 
 namespace libmlvc {
 

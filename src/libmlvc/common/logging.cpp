@@ -11,6 +11,7 @@
 #endif
 
 #include <cstdio>
+#include <ctime>
 #include <iomanip>
 #include <sstream>
 
@@ -58,8 +59,9 @@ void DefaultLogHandler(LogLevel level, const std::source_location& loc, std::str
     for (const char* p = loc.file_name(); *p; ++p)
         if (*p == '/' || *p == '\\') basename = p + 1;
 
-    std::fprintf(stderr, "%s [T#%lld][%5s][%s:%d]: %.*s\n", timestamp.c_str(), threadId, LogLevelToString(level),
-                 basename, loc.line(), static_cast<int>(msg.size()), msg.data());
+    std::fprintf(stderr, "%s [T#%llu][%5s][%s:%u]: %.*s\n", timestamp.c_str(),
+                 static_cast<unsigned long long>(threadId), LogLevelToString(level), basename,
+                 static_cast<unsigned>(loc.line()), static_cast<int>(msg.size()), msg.data());
 }
 
 Logger& Logger::Instance() noexcept

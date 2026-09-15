@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#pragma once
 #include <libmlvc/expected.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>

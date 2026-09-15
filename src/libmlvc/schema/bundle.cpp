@@ -22,7 +22,7 @@ namespace boost {
 
 void throw_exception(const std::exception& e, const boost::source_location& loc)
 {
-    MLVC_LOG_ABORT("Boost exception at %s:%d: %s", loc.file_name(), loc.line(), e.what());
+    MLVC_LOG_ABORT("Boost exception at %s:%u: %s", loc.file_name(), static_cast<unsigned>(loc.line()), e.what());
     std::terminate();
 }
 
