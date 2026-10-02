@@ -1,0 +1,33 @@
+{
+  "properties": {
+    "helpUri": "https://eng.ms/docs/microsoft-security/security/azure-security/cloudai-security-fundamentals-engineering/security-integration/guardian-wiki/microsoft-guardian/general/baselines"
+  },
+  "version": "1.0.0",
+  "baselines": {
+    "default": {
+      "name": "default",
+      "createdDate": "2026-10-02 08:12:34Z",
+      "lastUpdatedDate": "2026-10-02 08:12:34Z"
+    }
+  },
+  "results": {
+    "cff5c23348142f4afdff7529b6c5aaeb5b068f63861f3d3b8266fba56612d4ec": {
+      "signature": "cff5c23348142f4afdff7529b6c5aaeb5b068f63861f3d3b8266fba56612d4ec",
+      "alternativeSignatures": [
+        "b293b9ee1e1c79df878045d5f84fa5751f3a3d35ef033f9c9976e0ec7688397d",
+        "4ec3d140bd433ee245bc954ed9a786488bf1c14e7cfb66c7b17160c64cb72174",
+        "7a532aa72e095b59e9b6bee49d2e077bf60ce7e20bbbfe85fa1be0869ea914be"
+      ],
+      "target": "native/mlvc.exe",
+      "uriBaseId": "file:///C:/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2024",
+      "createdDate": "2026-10-02 08:12:34Z",
+      "expirationDate": "2027-03-21 08:13:58Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-02 08:13:58Z"
+    }
+  }
+}
