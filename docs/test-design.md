@@ -16,6 +16,7 @@ Test approach (per major version, using synthetic bitstreams with dummy payloads
 * Bitstream encoder tests: fixed header values + payload → validate serialized bytes match expected reference bitstreams
 * Bitstream decoder tests: same reference bitstreams → validate parsed header values and payload match expected
 * Error handling tests: malformed and incomplete bitstreams → validate decoder rejects gracefully with correct error codes, and that unknown NALU types are skipped
+* Header validation tests: reject out-of-range field values — invalid crop geometry, zero model dimensions (with cropping enabled or disabled), unsupported temporal-layer counts, oversized frame-index widths, out-of-range QP, and invalid frame temporal IDs — while accepting valid boundaries
 * Round-trip tests: ~100K encode → decode cycles sweeping the full parameter space (resolutions, QPs, minor versions, frame index bit widths, temporal layers, crop offsets, LTR slot combinations, P-frame variations)
 
 These tests ensure bitstream compatibility: bitstreams are interchangeable between any libmlvc versions that support the same MLVC model major version.

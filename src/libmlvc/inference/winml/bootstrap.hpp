@@ -47,7 +47,6 @@ struct WinMlApi {
     decltype(&::WinMLEpCatalogCreate) WinMLEpCatalogCreate = nullptr;
     decltype(&::WinMLEpCatalogRelease) WinMLEpCatalogRelease = nullptr;
     decltype(&::WinMLEpCatalogEnumProviders) WinMLEpCatalogEnumProviders = nullptr;
-    decltype(&::WinMLEpCatalogFindProvider) WinMLEpCatalogFindProvider = nullptr;
     decltype(&::WinMLEpGetNameSize) WinMLEpGetNameSize = nullptr;
     decltype(&::WinMLEpGetName) WinMLEpGetName = nullptr;
     decltype(&::WinMLEpGetVersionSize) WinMLEpGetVersionSize = nullptr;

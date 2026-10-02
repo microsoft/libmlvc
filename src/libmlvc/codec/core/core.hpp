@@ -87,6 +87,12 @@ protected:
     expected<int> GetQIndexShifted(const int qIndex, const int curFrameIdx) const;
 };
 
+// MlvcCodecCoreCommon's getter implementations are inherited via dominance by design
+#if defined(_MSC_VER)
+    #pragma warning(push)
+    #pragma warning(disable : 4250)
+#endif
+
 class MlvcEncoderCore : public MlvcCodecCoreCommon, public IMlvcEncoderCore {
 public:
     struct Stats {
@@ -167,5 +173,9 @@ protected:
     OutputTransformer<mlvc_f16_t> m_outputTransformer{};
     Stats m_stats{};
 };
+
+#if defined(_MSC_VER)
+    #pragma warning(pop)
+#endif
 
 }  // namespace libmlvc

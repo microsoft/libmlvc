@@ -1,50 +1,106 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# WindowsAppSdk setup for standalone mlvc builds
-# Find Windows App SDK packages and create IMPORTED target
+# Windows App SDK setup for standalone builds.
 #
-# This module defines:
+# Packages are read from WINDOWSAPPSDK_NUGET_PACKAGES_ROOT when set. The root
+# must be absolute and is never modified. Otherwise, the selected packages are
+# downloaded into the build tree and reused on subsequent configurations.
+#
+# Optional package selection inputs:
+#   WINDOWSAPPSDK_ML_VERSION
+#   WINDOWSAPPSDK_ML_SHA256
+#   WINDOWSAPPSDK_FOUNDATION_VERSION
+#   WINDOWSAPPSDK_FOUNDATION_SHA256
+#
+# This module provides:
 #   WindowsAppSdk::WindowsAppSdk - INTERFACE IMPORTED target bundling everything
 #   WINDOWSAPPSDK_ML_DIR         - Path to ML package (for advanced use)
 #   WINDOWSAPPSDK_FOUNDATION_DIR - Path to Foundation package (for advanced use)
-#   WINDOWSAPPSDK_BOOTSTRAP_DLL  - Path to Bootstrap DLL for runtime deployment
 #
-# The target also sets INTERFACE_COMPILE_DEFINITIONS:
+# The target's WINDOWSAPPSDK_RUNTIME_FILES property lists absolute runtime DLL
+# paths to deploy. It currently contains the bootstrap DLL.
+#
+# The target's INTERFACE_COMPILE_DEFINITIONS include:
 #   WINDOWSAPPSDK_VERSION_MAJOR  - Major version extracted from Foundation package
 #   WINDOWSAPPSDK_VERSION_MINOR  - Minor version extracted from Foundation package
 #
-# Standalone builds use fixed Windows App SDK versions.
-set(WINDOWSAPPSDK_ML_VERSION "1.8.2141")
-set(WINDOWSAPPSDK_ML_SHA256
-    "64cf795f3c0a7d26b87846330337594a70cffd95a8b02a876fa80b94e08ad82a"
-)
-set(WINDOWSAPPSDK_FOUNDATION_VERSION "1.8.260222000")
-set(WINDOWSAPPSDK_FOUNDATION_SHA256
-    "6a4df6ffc0d5f1a780112a8f781976e5aea6ebbe8c66abaad4ba8cc842854562"
-)
+if(NOT DEFINED WINDOWSAPPSDK_ML_VERSION)
+    set(WINDOWSAPPSDK_ML_VERSION "1.8.2141")
+endif()
+if(NOT DEFINED WINDOWSAPPSDK_ML_SHA256)
+    set(WINDOWSAPPSDK_ML_SHA256
+        "64cf795f3c0a7d26b87846330337594a70cffd95a8b02a876fa80b94e08ad82a"
+    )
+endif()
+if(NOT DEFINED WINDOWSAPPSDK_FOUNDATION_VERSION)
+    set(WINDOWSAPPSDK_FOUNDATION_VERSION "1.8.260222000")
+endif()
+if(NOT DEFINED WINDOWSAPPSDK_FOUNDATION_SHA256)
+    set(WINDOWSAPPSDK_FOUNDATION_SHA256
+        "6a4df6ffc0d5f1a780112a8f781976e5aea6ebbe8c66abaad4ba8cc842854562"
+    )
+endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/DownloadNuGet.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/DownloadNuGet.cmake")
 set(SDK_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/sdk")
-
-# Create SDK directory
-file(MAKE_DIRECTORY "${SDK_LOCATION}")
-
-# Download the ML package (contains ONNX Runtime)
-download_nuget_package(
-    Microsoft.WindowsAppSDK.ML
-    ${WINDOWSAPPSDK_ML_VERSION}
-    ${WINDOWSAPPSDK_ML_SHA256}
-    "${SDK_LOCATION}"
+if(WINDOWSAPPSDK_ML_VERSION VERSION_LESS "2.0")
+    set(_windowsappsdk_ml_package_name "Microsoft.WindowsAppSDK.ML")
+else()
+    set(_windowsappsdk_ml_package_name "Microsoft.Windows.AI.MachineLearning")
+endif()
+string(
+    TOLOWER "${_windowsappsdk_ml_package_name}"
+    _windowsappsdk_ml_package_lower
 )
 
-# Download the Foundation package (contains bootstrapper)
-download_nuget_package(
-    Microsoft.WindowsAppSDK.Foundation
-    ${WINDOWSAPPSDK_FOUNDATION_VERSION}
-    ${WINDOWSAPPSDK_FOUNDATION_SHA256}
-    "${SDK_LOCATION}"
-)
+if(DEFINED WINDOWSAPPSDK_NUGET_PACKAGES_ROOT)
+    set(SDK_LOCATION "${WINDOWSAPPSDK_NUGET_PACKAGES_ROOT}")
+    if(NOT IS_ABSOLUTE "${SDK_LOCATION}")
+        message(
+            FATAL_ERROR
+            "WINDOWSAPPSDK_NUGET_PACKAGES_ROOT must be absolute"
+        )
+    endif()
+    set(WINDOWSAPPSDK_ML_DIR
+        "${SDK_LOCATION}/${_windowsappsdk_ml_package_lower}/${WINDOWSAPPSDK_ML_VERSION}"
+    )
+    if(NOT IS_DIRECTORY "${WINDOWSAPPSDK_ML_DIR}")
+        set(WINDOWSAPPSDK_ML_DIR
+            "${SDK_LOCATION}/${_windowsappsdk_ml_package_name}.${WINDOWSAPPSDK_ML_VERSION}"
+        )
+    endif()
+    set(WINDOWSAPPSDK_FOUNDATION_DIR
+        "${SDK_LOCATION}/microsoft.windowsappsdk.foundation/${WINDOWSAPPSDK_FOUNDATION_VERSION}"
+    )
+    if(NOT IS_DIRECTORY "${WINDOWSAPPSDK_FOUNDATION_DIR}")
+        set(WINDOWSAPPSDK_FOUNDATION_DIR
+            "${SDK_LOCATION}/Microsoft.WindowsAppSDK.Foundation.${WINDOWSAPPSDK_FOUNDATION_VERSION}"
+        )
+    endif()
+else()
+    # Download the ML package (contains ONNX Runtime)
+    download_nuget_package(
+        "${_windowsappsdk_ml_package_name}"
+        ${WINDOWSAPPSDK_ML_VERSION}
+        ${WINDOWSAPPSDK_ML_SHA256}
+        "${SDK_LOCATION}"
+    )
+
+    # Download the Foundation package (contains bootstrapper)
+    download_nuget_package(
+        Microsoft.WindowsAppSDK.Foundation
+        ${WINDOWSAPPSDK_FOUNDATION_VERSION}
+        ${WINDOWSAPPSDK_FOUNDATION_SHA256}
+        "${SDK_LOCATION}"
+    )
+    set(WINDOWSAPPSDK_ML_DIR
+        "${SDK_LOCATION}/${_windowsappsdk_ml_package_name}.${WINDOWSAPPSDK_ML_VERSION}"
+    )
+    set(WINDOWSAPPSDK_FOUNDATION_DIR
+        "${SDK_LOCATION}/Microsoft.WindowsAppSDK.Foundation.${WINDOWSAPPSDK_FOUNDATION_VERSION}"
+    )
+endif()
 
 message(STATUS "Windows App SDK packages ready in ${SDK_LOCATION}")
 
@@ -74,14 +130,6 @@ else()
     )
 endif()
 
-# Set package directories directly (paths are deterministic after download)
-set(WINDOWSAPPSDK_ML_DIR
-    "${SDK_LOCATION}/Microsoft.WindowsAppSDK.ML.${WINDOWSAPPSDK_ML_VERSION}"
-)
-set(WINDOWSAPPSDK_FOUNDATION_DIR
-    "${SDK_LOCATION}/Microsoft.WindowsAppSDK.Foundation.${WINDOWSAPPSDK_FOUNDATION_VERSION}"
-)
-
 # Locate Windows SDK UnionMetadata for type resolution (e.g. Windows.Foundation.Uri)
 set(WIN_SDK_UNION_METADATA
     "$ENV{${_progfiles_x86}}/Windows Kits/10/UnionMetadata/${WIN_SDK_VERSION}"
@@ -97,7 +145,7 @@ endif()
 if(NOT EXISTS "${WINDOWSAPPSDK_ML_DIR}/include/winml/onnxruntime_c_api.h")
     message(
         FATAL_ERROR
-        "Could NOT find Microsoft.WindowsAppSDK.ML at ${WINDOWSAPPSDK_ML_DIR}"
+        "Could NOT find ${_windowsappsdk_ml_package_name} at ${WINDOWSAPPSDK_ML_DIR}"
     )
 endif()
 if(NOT EXISTS "${WINDOWSAPPSDK_FOUNDATION_DIR}/include/MddBootstrap.h")
@@ -132,10 +180,6 @@ else()
         "Unsupported target architecture: ${WINDOWSAPPSDK_TARGET_PROCESSOR}"
     )
 endif()
-
-set(WINDOWSAPPSDK_BOOTSTRAP_DLL
-    "${WINDOWSAPPSDK_FOUNDATION_DIR}/runtimes/${WINDOWSAPPSDK_RUNTIME_ARCH}/native/Microsoft.WindowsAppRuntime.Bootstrap.dll"
-)
 
 # Extract major.minor from Foundation package version (e.g. "1.8.250906002" -> 1, 8)
 # and expose as preprocessor defines via the INTERFACE target.
@@ -202,6 +246,8 @@ add_library(WindowsAppSdk::WindowsAppSdk ALIAS WindowsAppSdk)
 set_target_properties(
     WindowsAppSdk
     PROPERTIES
+        WINDOWSAPPSDK_RUNTIME_FILES
+            "${WINDOWSAPPSDK_FOUNDATION_DIR}/runtimes/${WINDOWSAPPSDK_RUNTIME_ARCH}/native/Microsoft.WindowsAppRuntime.Bootstrap.dll"
         INTERFACE_INCLUDE_DIRECTORIES
             "${WINDOWSAPPSDK_CPPWINRT_OUTPUT_DIR};${WINDOWSAPPSDK_ML_DIR}/include;${WINDOWSAPPSDK_FOUNDATION_DIR}/include"
         INTERFACE_LINK_LIBRARIES "oleaut32;RuntimeObject"

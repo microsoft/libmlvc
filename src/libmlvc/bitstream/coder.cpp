@@ -6,6 +6,7 @@
 #include <libmlvc/error_codes.hpp>
 
 #include <array>
+#include <cstdint>
 #include <functional>
 
 namespace libmlvc {
@@ -20,6 +21,8 @@ constexpr int MAX_TEMPORAL_LAYERS_MINUS1_BITS = 3;
 constexpr int LTR_NUM_SLOTS_BITS = 4;
 constexpr int MAX_SPS_ID = 3;
 constexpr int MAX_PPS_ID = 3;
+constexpr int MIN_FRAME_IDX_BITS = 8;
+constexpr int MAX_FRAME_IDX_BITS = 30;
 constexpr std::array<std::byte, 4> NALU_START_CODE = {
     std::byte{ 0x00 },
     std::byte{ 0x00 },
@@ -102,7 +105,7 @@ void NaluBuilder::WriteFrameHeader(const SpsNalu& sps, const NaluHeader& naluHea
     m_bitWriter.WriteUe(frameHeader.ppsId);
     m_bitWriter.WriteSe(frameHeader.qpDelta);
 
-    const int frameIdxBits = sps.frameIdxBitsMinus8 + 8;
+    const int frameIdxBits = sps.frameIdxBitsMinus8 + MIN_FRAME_IDX_BITS;
     int numLtrSlots = 0;
     for (int i = 0; i < static_cast<int>(frameHeader.ltrSlots.size()); i++) {
         if (frameHeader.ltrSlots[i].HasValue()) {
@@ -250,15 +253,38 @@ expected<SpsNalu> NaluParser::ReadSps()
         sps.cropBottomDiv2 = 0;
     }
 
+    // Widen the non-negative crop sums before checking that the remaining size is positive.
+    // Runs for both crop paths so zero model dimensions are rejected either way, and it
+    // bounds the later conversion from Div2 values to pixels.
+    const auto cropWidthDiv2 = static_cast<int64_t>(sps.cropLeftDiv2) + sps.cropRightDiv2;
+    const auto cropHeightDiv2 = static_cast<int64_t>(sps.cropTopDiv2) + sps.cropBottomDiv2;
+    if (cropWidthDiv2 >= sps.modelWidthDiv2 || cropHeightDiv2 >= sps.modelHeightDiv2) {
+        MLVC_LOG_ERROR("Invalid SPS geometry (div2): left=%d right=%d top=%d bottom=%d for model %dx%d", sps.cropLeftDiv2,
+                       sps.cropRightDiv2, sps.cropTopDiv2, sps.cropBottomDiv2, sps.modelWidthDiv2, sps.modelHeightDiv2);
+        return make_error_code(Error::bit_stream_unexpected_error);
+    }
+
     {
         auto maxTemporalLayersMinus1 = bitReader.ReadUint(MAX_TEMPORAL_LAYERS_MINUS1_BITS);
         if (!maxTemporalLayersMinus1) return maxTemporalLayersMinus1.error();
+
+        if (maxTemporalLayersMinus1.value() >= MAX_TEMPORAL_LAYERS) {
+            MLVC_LOG_ERROR("Max temporal layers %d exceeds maximum %d", maxTemporalLayersMinus1.value() + 1,
+                           MAX_TEMPORAL_LAYERS);
+            return make_error_code(Error::bit_stream_unexpected_error);
+        }
         sps.maxTemporalLayersMinus1 = maxTemporalLayersMinus1.value();
     }
 
     {
         auto frameIdxBitsMinus8 = bitReader.ReadUe();
         if (!frameIdxBitsMinus8) return frameIdxBitsMinus8.error();
+
+        if (frameIdxBitsMinus8.value() > MAX_FRAME_IDX_BITS - MIN_FRAME_IDX_BITS) {
+            MLVC_LOG_ERROR("Frame index bits (minus %d) %d out of range [0, %d]", MIN_FRAME_IDX_BITS,
+                           frameIdxBitsMinus8.value(), MAX_FRAME_IDX_BITS - MIN_FRAME_IDX_BITS);
+            return make_error_code(Error::bit_stream_unexpected_error);
+        }
         sps.frameIdxBitsMinus8 = frameIdxBitsMinus8.value();
     }
 
@@ -295,9 +321,15 @@ expected<PpsNalu> NaluParser::ReadPps()
     }
 
     {
-        auto ret = bitReader.ReadSe();
-        if (!ret) return ret.error();
-        pps.initQpMinus26 = ret.value();
+        auto initQpMinus26 = bitReader.ReadSe();
+        if (!initQpMinus26) return initQpMinus26.error();
+
+        if (initQpMinus26.value() < MIN_QP - 26 || initQpMinus26.value() > MAX_QP - 26) {
+            MLVC_LOG_ERROR("Initial QP (minus 26) %d out of range [%d, %d]", initQpMinus26.value(), MIN_QP - 26,
+                           MAX_QP - 26);
+            return make_error_code(Error::bit_stream_unexpected_error);
+        }
+        pps.initQpMinus26 = initQpMinus26.value();
     }
 
     if (auto ret = bitReader.ReadStopBit(); !ret) {
@@ -436,7 +468,7 @@ expected<FrameHeader> NaluParser::ParseFrameHeader(BitReader& bitReader, const S
         frameHeader.qpDelta = qpDelta.value();
     }
 
-    const int frameIdxBits = sps.frameIdxBitsMinus8 + 8;
+    const int frameIdxBits = sps.frameIdxBitsMinus8 + MIN_FRAME_IDX_BITS;
     {
         std::fill(frameHeader.ltrSlots.begin(), frameHeader.ltrSlots.end(), LtrSlotInfo{});
         auto numLtrSlots = bitReader.ReadUint(LTR_NUM_SLOTS_BITS);
@@ -519,7 +551,7 @@ expected<std::span<const std::byte>> BitstreamEncoder::Encode(const FrameData& d
         newSps.cropBottomDiv2 = data.cropOffsets.bottom / 2;
         newSps.transposeFlag = data.transposeFlag;
         newSps.maxTemporalLayersMinus1 = data.maxTemporalLayers - 1;
-        newSps.frameIdxBitsMinus8 = data.frameIdxBits - 8;
+        newSps.frameIdxBitsMinus8 = data.frameIdxBits - MIN_FRAME_IDX_BITS;
 
         const bool updateSps = m_sps.spsId < 0 || m_pps.ppsId < 0 || newSps != m_sps;
         if (updateSps) {
@@ -660,6 +692,12 @@ expected<std::optional<FrameData>> BitstreamDecoder::DecodeNextNalu()
             frameType = FrameType::P_FRAME;
         }
 
+        const int64_t qp = static_cast<int64_t>(frameHeader.qpDelta) + m_pps.initQpMinus26 + 26;
+        if (qp < MIN_QP || qp > MAX_QP) {
+            MLVC_LOG_ERROR("QP %lld out of range [%d, %d]", static_cast<long long>(qp), MIN_QP, MAX_QP);
+            return make_error_code(Error::bit_stream_unexpected_error);
+        }
+
         FrameData res{};
         res.mlvcVersion.major = m_sps.mlvcVersionMajor;
         res.mlvcVersion.minor = m_sps.mlvcVersionMinor;
@@ -670,11 +708,11 @@ expected<std::optional<FrameData>> BitstreamDecoder::DecodeNextNalu()
         res.cropOffsets.top = 2 * m_sps.cropTopDiv2;
         res.cropOffsets.bottom = 2 * m_sps.cropBottomDiv2;
         res.transposeFlag = m_sps.transposeFlag;
-        res.frameIdxBits = m_sps.frameIdxBitsMinus8 + 8;
+        res.frameIdxBits = m_sps.frameIdxBitsMinus8 + MIN_FRAME_IDX_BITS;
         res.temporalId = temporalId;
         res.maxTemporalLayers = maxTemporalLayers;
         res.frameType = frameType;
-        res.qp = frameHeader.qpDelta + (m_pps.initQpMinus26 + 26);
+        res.qp = static_cast<int>(qp);
         res.featureResetFlag = frameHeader.featureResetFlag;
         res.curFrameIdx = frameHeader.frameIdx;
         res.refFrameIdx = frameHeader.refFrameIdx;

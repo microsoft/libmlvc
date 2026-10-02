@@ -760,6 +760,32 @@ protected:
             EXPECT_TRUE(r) << r.error().message();
         }
     }
+
+    // Encodes `sps` into a minimal SPS+PPS+IDR access unit, decodes it, and returns
+    // the decode error code (empty on success). `initQpMinus26`/`qpDelta` set the PPS
+    // and frame-header QP fields; `temporalIdPlus1` sets the frame NALU header field.
+    // The defaults yield a valid, in-range access unit.
+    static std::error_code DecodeAccessUnit(SpsNalu sps, int initQpMinus26 = 0, int qpDelta = 0, int temporalIdPlus1 = 1)
+    {
+        sps.naluHeader = NaluHeader{ NaluType::SPS };
+        sps.spsId = 0;
+
+        const PpsNalu pps{ .ppsId = 0, .spsId = 0, .initQpMinus26 = initQpMinus26 };
+
+        const auto payload = Bytes({ 0xCA, 0xFE });
+        FrameNalu frame{ .frameHeader = { .ppsId = 0, .qpDelta = qpDelta }, .payload = payload };
+        frame.naluHeader.temporalIdPlus1 = temporalIdPlus1;
+
+        NaluBuilder builder;
+        builder.AppendSps(sps);
+        builder.AppendPps(pps);
+        builder.AppendFrame(sps, frame);
+
+        BitstreamDecoder decoder;
+        EXPECT_TRUE(decoder.Initialize());
+        auto r = decoder.Decode(builder.GetOutput());
+        return r ? std::error_code{} : r.error();
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -788,6 +814,179 @@ TEST_F(UnitTestBitstreamSpecV0, ErrorHandling)
         SCOPED_TRACE(entry.name);
         TestDecoderError(entry);
     }
+}
+
+TEST_F(UnitTestBitstreamSpecV0, ModelDimensionsMustBePositive)
+{
+    const auto invalid = make_error_code(Error::bit_stream_unexpected_error);
+    for (const bool cropFlag : { false, true }) {
+        SCOPED_TRACE(cropFlag ? "crop enabled" : "crop disabled");
+        auto decodeWithDimensions = [cropFlag](int widthDiv2, int heightDiv2) {
+            return DecodeAccessUnit({
+                .mlvcVersionMinor = 1,
+                .modelWidthDiv2 = widthDiv2,
+                .modelHeightDiv2 = heightDiv2,
+                .cropFlag = cropFlag,
+            });
+        };
+
+        EXPECT_EQ(decodeWithDimensions(0, 32), invalid) << "zero model width";
+        EXPECT_EQ(decodeWithDimensions(32, 0), invalid) << "zero model height";
+        EXPECT_EQ(decodeWithDimensions(0, 0), invalid) << "both model dimensions zero";
+        EXPECT_FALSE(decodeWithDimensions(1, 1)) << "minimum positive model dimensions";
+        EXPECT_FALSE(decodeWithDimensions(32, 32)) << "64x64 model without cropping";
+    }
+}
+
+TEST_F(UnitTestBitstreamSpecV0, CropOffsetsBoundedToModelSize)
+{
+    // 64x64 model (modelWidthDiv2 = modelHeightDiv2 = 32) with the given crop offsets.
+    auto decodeWithCropDiv2 = [](int left, int right, int top, int bottom) {
+        const SpsNalu sps{
+            .mlvcVersionMajor = 0,
+            .mlvcVersionMinor = 1,
+            .modelWidthDiv2 = 32,
+            .modelHeightDiv2 = 32,
+            .cropFlag = true,
+            .cropLeftDiv2 = left,
+            .cropRightDiv2 = right,
+            .cropTopDiv2 = top,
+            .cropBottomDiv2 = bottom,
+            .frameIdxBitsMinus8 = 2,
+        };
+        return DecodeAccessUnit(sps);
+    };
+
+    const auto invalid = make_error_code(Error::bit_stream_unexpected_error);
+
+    // Malicious: 2*cropDiv2 wraps negative and inflates the display size -> rejected.
+    EXPECT_EQ(decodeWithCropDiv2(0, 0x7FFFFFC0, 0, 0), invalid) << "wrapping right crop";
+    EXPECT_EQ(decodeWithCropDiv2(0x7FFFFFE0, 0, 0, 0), invalid) << "wrapping left crop";
+    EXPECT_EQ(decodeWithCropDiv2(0, 0, 0, 0x7FFFFFC0), invalid) << "wrapping bottom crop";
+
+    // Boundary: sum equal to modelWidthDiv2 leaves zero cropped size -> rejected.
+    EXPECT_EQ(decodeWithCropDiv2(16, 16, 0, 0), invalid) << "width crop sum == modelWidthDiv2";
+    EXPECT_EQ(decodeWithCropDiv2(0, 0, 16, 16), invalid) << "height crop sum == modelHeightDiv2";
+
+    // Valid: sum strictly less than modelWidthDiv2/HeightDiv2 -> accepted.
+    EXPECT_FALSE(decodeWithCropDiv2(16, 15, 8, 7)) << "in-bounds crop should decode";
+    EXPECT_FALSE(decodeWithCropDiv2(0, 0, 0, 0)) << "zero crop should decode";
+}
+
+TEST_F(UnitTestBitstreamSpecV0, SpsFieldBoundsRejected)
+{
+    // 64x64 model with the given temporal-layer and frame-index-width fields.
+    auto decodeWithSps = [](int maxTemporalLayersMinus1, int frameIdxBitsMinus8) {
+        const SpsNalu sps{
+            .mlvcVersionMajor = 0,
+            .mlvcVersionMinor = 1,
+            .modelWidthDiv2 = 32,
+            .modelHeightDiv2 = 32,
+            .maxTemporalLayersMinus1 = maxTemporalLayersMinus1,
+            .frameIdxBitsMinus8 = frameIdxBitsMinus8,
+        };
+        return DecodeAccessUnit(sps);
+    };
+
+    const auto invalid = make_error_code(Error::bit_stream_unexpected_error);
+
+    // maxTemporalLayersMinus1: 3-bit field allows up to 8 layers; only 2 supported.
+    EXPECT_EQ(decodeWithSps(/*maxTLm1=*/2, /*fibMinus8=*/2), invalid) << "3 temporal layers";
+    EXPECT_EQ(decodeWithSps(/*maxTLm1=*/7, /*fibMinus8=*/2), invalid) << "8 temporal layers";
+
+    // frameIdxBitsMinus8: frameIdxBits must stay <= MAX_FRAME_IDX_BITS (30).
+    EXPECT_EQ(decodeWithSps(/*maxTLm1=*/0, /*fibMinus8=*/23), invalid) << "frameIdxBits 31";
+    EXPECT_EQ(decodeWithSps(/*maxTLm1=*/0, /*fibMinus8=*/24), invalid) << "frameIdxBits 32";
+    EXPECT_EQ(decodeWithSps(/*maxTLm1=*/0, /*fibMinus8=*/100), invalid) << "frameIdxBits 108";
+
+    // Valid boundaries: 2 layers and frameIdxBits in [8, 30] must be accepted.
+    EXPECT_FALSE(decodeWithSps(/*maxTLm1=*/1, /*fibMinus8=*/0)) << "2 layers, 8 bits";
+    EXPECT_FALSE(decodeWithSps(/*maxTLm1=*/0, /*fibMinus8=*/22)) << "1 layer, 30 bits";
+}
+
+TEST_F(UnitTestBitstreamSpecV0, PpsInitQpValidatedWithoutFrame)
+{
+    // A parameter-set-only access unit (SPS + PPS, no frame NALU) still parses the PPS,
+    // so an out-of-range init_qp is rejected at PPS parse rather than deferred to a frame.
+    auto decodeSpsAndPps = [](int initQpMinus26) {
+        const SpsNalu sps{
+            .naluHeader = NaluHeader{ NaluType::SPS },
+            .mlvcVersionMinor = 1,
+            .spsId = 0,
+            .modelWidthDiv2 = 32,
+            .modelHeightDiv2 = 32,
+        };
+        const PpsNalu pps{ .ppsId = 0, .spsId = 0, .initQpMinus26 = initQpMinus26 };
+
+        NaluBuilder builder;
+        builder.AppendSps(sps);
+        builder.AppendPps(pps);
+
+        BitstreamDecoder decoder;
+        EXPECT_TRUE(decoder.Initialize());
+        auto r = decoder.Decode(builder.GetOutput());
+        return r ? std::error_code{} : r.error();
+    };
+
+    // Invalid init_qp is caught while parsing the PPS.
+    EXPECT_EQ(decodeSpsAndPps(26), make_error_code(Error::bit_stream_unexpected_error)) << "init_qp 52";
+
+    // Valid init_qp: the PPS parses cleanly and the unit is reported as partial (no frame).
+    EXPECT_EQ(decodeSpsAndPps(0), make_error_code(Error::bit_stream_partial_access_unit_error)) << "no frame";
+}
+
+TEST_F(UnitTestBitstreamSpecV0, QpMustBeInValidRange)
+{
+    // 64x64 model; init_qp = initQpMinus26 + 26 must be in [MIN_QP, MAX_QP] (checked at
+    // the PPS), and the combined qp = qpDelta + init_qp must be too (checked per frame).
+    auto decodeWithQp = [](int initQpMinus26, int qpDelta) {
+        const SpsNalu sps{
+            .mlvcVersionMajor = 0,
+            .mlvcVersionMinor = 1,
+            .modelWidthDiv2 = 32,
+            .modelHeightDiv2 = 32,
+        };
+        return DecodeAccessUnit(sps, initQpMinus26, qpDelta);
+    };
+
+    const auto invalid = make_error_code(Error::bit_stream_unexpected_error);
+
+    // init_qp out of range is rejected at the PPS, before the frame is parsed
+    // (0x3FFFFFFF is the largest ReadSe/WriteSe value).
+    EXPECT_EQ(decodeWithQp(/*initQpMinus26=*/-27, /*qpDelta=*/0), invalid) << "init_qp -1";
+    EXPECT_EQ(decodeWithQp(/*initQpMinus26=*/26, /*qpDelta=*/0), invalid) << "init_qp 52";
+    EXPECT_EQ(decodeWithQp(/*initQpMinus26=*/0x3FFFFFFF, /*qpDelta=*/0), invalid) << "init_qp far out of range";
+
+    // Valid init_qp but qp_delta pushes the combined qp out of range (rejected per frame).
+    EXPECT_EQ(decodeWithQp(/*initQpMinus26=*/25, /*qpDelta=*/1), invalid) << "combined qp 52";
+    EXPECT_EQ(decodeWithQp(/*initQpMinus26=*/-26, /*qpDelta=*/-1), invalid) << "combined qp -1";
+
+    // Valid boundaries: combined qp == MIN_QP and qp == MAX_QP.
+    EXPECT_FALSE(decodeWithQp(/*initQpMinus26=*/-26, /*qpDelta=*/0)) << "qp 0";
+    EXPECT_FALSE(decodeWithQp(/*initQpMinus26=*/25, /*qpDelta=*/0)) << "qp 51";
+    EXPECT_FALSE(decodeWithQp(/*initQpMinus26=*/-26, /*qpDelta=*/51)) << "qp 51 via delta";
+}
+
+TEST_F(UnitTestBitstreamSpecV0, FrameTemporalIdRejected)
+{
+    const auto invalid = make_error_code(Error::bit_stream_unexpected_error);
+
+    // 64x64 model, maxTemporalLayersMinus1 = 0 -> a single temporal layer (id 0 only).
+    const SpsNalu sps{
+        .mlvcVersionMajor = 0,
+        .mlvcVersionMinor = 1,
+        .modelWidthDiv2 = 32,
+        .modelHeightDiv2 = 32,
+    };
+
+    // temporalIdPlus1 == 0 is invalid outright.
+    EXPECT_EQ(DecodeAccessUnit(sps, 0, 0, /*temporalIdPlus1=*/0), invalid) << "temporalIdPlus1 == 0";
+
+    // temporalId (= temporalIdPlus1 - 1) must be below maxTemporalLayers (1 here).
+    EXPECT_EQ(DecodeAccessUnit(sps, 0, 0, /*temporalIdPlus1=*/2), invalid) << "temporalId >= maxTemporalLayers";
+
+    // Valid: temporalIdPlus1 == 1 -> temporalId 0.
+    EXPECT_FALSE(DecodeAccessUnit(sps, 0, 0, /*temporalIdPlus1=*/1)) << "temporalId 0";
 }
 
 TEST_F(UnitTestBitstreamSpecV0, RoundTrip)
