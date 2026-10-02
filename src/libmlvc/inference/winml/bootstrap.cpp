@@ -47,20 +47,18 @@ constexpr wchar_t WINDOWSAPPSDK_PUBLISHER_ID[] = L"8wekyb3d8bbwe";
 constexpr wchar_t kOnnxRuntimeDllName[] = L"onnxruntime.dll";
 constexpr wchar_t kWinMLDllName[] = L"Microsoft.Windows.AI.MachineLearning.dll";
 
-#if WINDOWSAPPSDK_VERSION_MAJOR != 1 || WINDOWSAPPSDK_VERSION_MINOR != 8
-    #error "Unsupported Windows App SDK version"
-#endif
-
 static PACKAGE_VERSION GetWindowsAppSdkMinVersion()
 {
     PACKAGE_VERSION minVersion{};
 
+#if WINDOWSAPPSDK_VERSION_MAJOR == 1 && WINDOWSAPPSDK_VERSION_MINOR == 8
     // Windows App SDK 1.8.1 (1.8.250916003) is the first release with Windows ML support.
     // Its runtime package version is 8000.625.330.0.
     minVersion.Major = 8000;
     minVersion.Minor = 625;
     minVersion.Build = 330;
     minVersion.Revision = 0;
+#endif
     return minVersion;
 }
 
@@ -242,9 +240,12 @@ static expected<std::wstring> ResolveWindowsAppRuntimePathForPackagedApp()
     }
 
     PACKAGE_VERSION minVersion = GetWindowsAppSdkMinVersion();
-    std::wstring packageFamilyName = L"Microsoft.WindowsAppRuntime." + std::to_wstring(WINDOWSAPPSDK_VERSION_MAJOR)
-                                     + L"." + std::to_wstring(WINDOWSAPPSDK_VERSION_MINOR) + L"_"
-                                     + WINDOWSAPPSDK_PUBLISHER_ID;
+    std::wstring packageFamilyName = L"Microsoft.WindowsAppRuntime." + std::to_wstring(WINDOWSAPPSDK_VERSION_MAJOR);
+    if constexpr (WINDOWSAPPSDK_VERSION_MAJOR == 1) {
+        packageFamilyName += L"." + std::to_wstring(WINDOWSAPPSDK_VERSION_MINOR);
+    }
+    packageFamilyName += L"_";
+    packageFamilyName += WINDOWSAPPSDK_PUBLISHER_ID;
 
     // If the appxmanifest already declares a static <PackageDependency> on the
     // matching Windows App Runtime framework, no dynamic AddPackageDependency call is needed
@@ -517,7 +518,6 @@ static expected<void> ResolveWinMlApiFunctions(HMODULE hWinML, WinMlApi& outApi)
     MLVC_RESOLVE_WINML_FN(WinMLEpCatalogCreate)
     MLVC_RESOLVE_WINML_FN(WinMLEpCatalogRelease)
     MLVC_RESOLVE_WINML_FN(WinMLEpCatalogEnumProviders)
-    MLVC_RESOLVE_WINML_FN(WinMLEpCatalogFindProvider)
     MLVC_RESOLVE_WINML_FN(WinMLEpGetNameSize)
     MLVC_RESOLVE_WINML_FN(WinMLEpGetName)
     MLVC_RESOLVE_WINML_FN(WinMLEpGetVersionSize)
@@ -624,6 +624,41 @@ static BOOL CALLBACK LogProviderCallback([[maybe_unused]] WinMLEpHandle ep, cons
                   info && info->packageFamilyName ? info->packageFamilyName : "(null)",
                   info && info->libraryPath ? info->libraryPath : "(null)");
     return TRUE;  // keep enumerating
+}
+
+struct FindProviderContext {
+    const char* providerName = nullptr;
+    bool readyOnly = false;
+    int bestScore = -1;
+    WinMLEpHandle best = nullptr;
+};
+
+static BOOL CALLBACK FindProviderCallback(WinMLEpHandle ep, const WinMLEpInfo* info, void* context)
+{
+    auto* ctx = static_cast<FindProviderContext*>(context);
+    if (!info || !info->name || std::string_view{ info->name } != ctx->providerName) return TRUE;
+    if (ctx->readyOnly && info->readyState != WinMLEpReadyState_Ready) return TRUE;
+    const bool installed = info->readyState != WinMLEpReadyState_NotPresent;
+    const bool ready = info->readyState == WinMLEpReadyState_Ready;
+    // Higher is better: Ready > NotReady > NotPresent. Catalog order breaks ties.
+    const int score = installed + ready;
+    if (score > ctx->bestScore) {
+        ctx->bestScore = score;
+        ctx->best = ep;
+    }
+    return TRUE;  // keep enumerating
+}
+
+// Avoid WinMLEpCatalogFindProvider, which may return different matches across calls.
+static HRESULT FindProvider(const WinMlApi& winMl, WinMLEpCatalogHandle catalog, const char* providerName,
+                            bool readyOnly, WinMLEpHandle* ep)
+{
+    FindProviderContext ctx{ .providerName = providerName, .readyOnly = readyOnly };
+    const HRESULT hr = winMl.WinMLEpCatalogEnumProviders(catalog, FindProviderCallback, &ctx);
+    if (FAILED(hr)) return hr;
+    if (!ctx.best) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    *ep = ctx.best;
+    return S_OK;
 }
 
 struct EnsureReadyProgressContext {
@@ -735,17 +770,19 @@ expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const 
     CatalogPtr catalog(catalogRaw, winMl.WinMLEpCatalogRelease);
 
     // Log every provider currently visible in the catalog, for diagnostics.
-    MLVC_LOG_INFO("WindowsML execution providers catalog:");
-    int enumIndex = 0;
-    winMl.WinMLEpCatalogEnumProviders(catalog.get(), LogProviderCallback, &enumIndex);
+    {
+        MLVC_LOG_INFO("WindowsML execution providers catalog:");
+        int enumIndex = 0;
+        winMl.WinMLEpCatalogEnumProviders(catalog.get(), LogProviderCallback, &enumIndex);
+    }
 
     // Find the requested provider, download, and ensure it's ready for use
     std::optional<uint32_t> downloadTimeMs;
     {
         WinMLEpHandle epRaw = nullptr;
-        hr = winMl.WinMLEpCatalogFindProvider(catalog.get(), providerName, /*packageFamilyName=*/nullptr, &epRaw);
-        if (FAILED(hr) || !epRaw) {
-            MLVC_LOG_ERROR("WinMLEpCatalogFindProvider failed for '%s' (HRESULT: 0x%08lX)", providerLogName,
+        hr = FindProvider(winMl, catalog.get(), providerName, /*readyOnly=*/false, &epRaw);
+        if (FAILED(hr)) {
+            MLVC_LOG_ERROR("FindProvider failed for '%s' (HRESULT: 0x%08lX)", providerLogName,
                            static_cast<unsigned long>(hr));
             return make_unexpected(make_error_code(Error::ep_download_error));
         }
@@ -755,13 +792,14 @@ expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const 
             MLVC_LOG_ERROR("WinMLEpGetReadyState failed for '%s'", providerLogName);
             return make_unexpected(make_error_code(Error::ep_download_error));
         }
-        MLVC_LOG_DEBUG("Provider '%s' ready state: %s", providerLogName, ReadyStateToString(readyState));
 
         if (cancelToken.IsCancelled()) {
             return make_unexpected(make_error_code(Error::operation_cancelled));
         }
 
         if (readyState != WinMLEpReadyState_Ready) {
+            MLVC_LOG_INFO("Ensuring execution provider '%s' is ready (current ReadyState=%s)", providerLogName,
+                          ReadyStateToString(readyState));
             const bool wasDownload = (readyState == WinMLEpReadyState_NotPresent);
             const auto startTime = std::chrono::steady_clock::now();
             if (auto ret =
@@ -784,9 +822,9 @@ expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const 
     std::string epPackageVersion;
     {
         WinMLEpHandle epRaw = nullptr;
-        hr = winMl.WinMLEpCatalogFindProvider(catalog.get(), providerName, /*packageFamilyName=*/nullptr, &epRaw);
-        if (FAILED(hr) || !epRaw) {
-            MLVC_LOG_ERROR("WinMLEpCatalogFindProvider failed for '%s' (HRESULT: 0x%08lX)", providerLogName,
+        hr = FindProvider(winMl, catalog.get(), providerName, /*readyOnly=*/true, &epRaw);
+        if (FAILED(hr)) {
+            MLVC_LOG_ERROR("FindProvider failed for '%s' (HRESULT: 0x%08lX)", providerLogName,
                            static_cast<unsigned long>(hr));
             return make_unexpected(make_error_code(Error::ep_register_error));
         }

@@ -16,6 +16,18 @@ $env:VCPKG_ROOT = "C:\path\to\vcpkg"
 export VCPKG_ROOT=/path/to/vcpkg
 ```
 
+## Windows App SDK
+
+On Windows, libmlvc's CMake build downloads the default Windows App SDK packages. To override the
+dependency, append `-DNAME=value` entries to `VCPKG_CMAKE_CONFIGURE_OPTIONS` in a custom triplet
+under `if(PORT STREQUAL "libmlvc")`, not in the application CMake cache. These downloads bypass
+vcpkg's asset cache and origin-blocking controls.
+
+- **Defaults:** no SDK overrides needed; to download different package versions, set the
+	`WINDOWSAPPSDK_{ML,FOUNDATION}_{VERSION,SHA256}` values.
+- **Restored packages:** set `WINDOWSAPPSDK_NUGET_PACKAGES_ROOT` to an absolute NuGet package root.
+	The root is read-only; missing packages fail configuration instead of being downloaded.
+
 ## Build and run
 
 Preset names are `<platform>-<linkage>` and `<platform>-<linkage>-<config>`, where linkage is

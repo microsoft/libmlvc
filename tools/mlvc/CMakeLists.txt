@@ -37,8 +37,7 @@ if(MLVC_TOOL_RUNTIME_FILES)
         TARGET mlvc
         POST_BUILD
         COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different "${MLVC_TOOL_RUNTIME_FILES}"
-            "$<TARGET_FILE_DIR:mlvc>"
+            "$<$<BOOL:$<JOIN:${MLVC_TOOL_RUNTIME_FILES},>>:${CMAKE_COMMAND};-E;copy_if_different;${MLVC_TOOL_RUNTIME_FILES};$<TARGET_FILE_DIR:mlvc>>"
         COMMAND_EXPAND_LISTS
         COMMENT "Copying runtime libraries next to mlvc"
         VERBATIM

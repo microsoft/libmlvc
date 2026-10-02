@@ -1,7 +1,6 @@
 trigger:
   - main
-pr:
-  - '*'
+pr: none
 
 resources:
   repositories:
@@ -14,6 +13,11 @@ extends:
   template: v1/IC3.Official.PipelineTemplate.yml@ic3Pipelines
   parameters:
     serviceTreeId: 'a1984786-4804-42cd-b1a8-65accf2efbeb'
+    sdl:
+      credscan:
+        enabled: true
+      policheck:
+        enabled: true
     pool:
       name: ess-1eshp-windows-latest
       os: windows
@@ -50,11 +54,18 @@ extends:
                   nugetConfigPath: $(Build.SourcesDirectory)/.azure-devops/nuget.config
                   restoreDirectory: $(Build.SourcesDirectory)/build/win-x64/sdk
                   noCache: true
+              - pwsh: |
+                  $visualStudioPath = & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -latest -requires Microsoft.VisualStudio.Component.Vcpkg -property installationPath
+                  if ([string]::IsNullOrWhiteSpace($visualStudioPath)) {
+                    throw 'A Visual Studio installation with the vcpkg component was not found.'
+                  }
+                  $vcpkgRoot = Join-Path $visualStudioPath 'VC\vcpkg'
+                  Write-Host "##vso[task.setvariable variable=VCPKG_ROOT]$vcpkgRoot"
+                displayName: Locate Visual Studio vcpkg
               - pwsh: >-
                   cmake --preset win-x64
-                  -DLIBMLVC_ALLOW_NUGET_DOWNLOADS=OFF
+                  "-DWINDOWSAPPSDK_NUGET_PACKAGES_ROOT:PATH=$(Build.SourcesDirectory)/build/win-x64/sdk"
                   -DLIBMLVC_ALLOW_VCPKG_DOWNLOADS=OFF
-                  -DLIBMLVC_BUILD_TESTS=OFF
                   -DBUILD_SHARED_LIBS=OFF
                   -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
                   "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/INCREMENTAL:NO /DEBUG:FULL /OPT:REF /OPT:ICF"
@@ -65,7 +76,6 @@ extends:
                   $buildDirectory = Join-Path $env:BUILD_SOURCESDIRECTORY 'build/win-x64'
                   $artifactDirectory = Join-Path $env:BUILD_ARTIFACTSTAGINGDIRECTORY 'native'
                   $sourceFiles = @(
-                    'src/Release/mlvc.lib'
                     'tools/mlvc/Release/mlvc.exe'
                     'tools/mlvc/Release/mlvc.pdb'
                   ) | ForEach-Object { Join-Path $buildDirectory $_ }

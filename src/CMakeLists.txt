@@ -213,19 +213,31 @@ target_sources(
 target_link_libraries(libmlvc PRIVATE ${LIBMLVC_PRIVATE_LINK_LIBRARIES})
 
 if(WIN32)
-    if(NOT EXISTS "${WINDOWSAPPSDK_BOOTSTRAP_DLL}")
-        message(
-            FATAL_ERROR
-            "Windows App SDK bootstrap DLL not found: ${WINDOWSAPPSDK_BOOTSTRAP_DLL}"
+    get_target_property(
+        _windowsappsdk_runtime_files
+        WindowsAppSdk::WindowsAppSdk
+        WINDOWSAPPSDK_RUNTIME_FILES
+    )
+    if(NOT _windowsappsdk_runtime_files AND WINDOWSAPPSDK_BOOTSTRAP_DLL)
+        set(_windowsappsdk_runtime_files "${WINDOWSAPPSDK_BOOTSTRAP_DLL}")
+    endif()
+    if(_windowsappsdk_runtime_files)
+        set(_libmlvc_install_runtime_files "")
+        foreach(_runtime_file IN LISTS _windowsappsdk_runtime_files)
+            get_filename_component(_runtime_name "${_runtime_file}" NAME)
+            list(
+                APPEND _libmlvc_install_runtime_files
+                "$<INSTALL_PREFIX>/bin/${_runtime_name}"
+            )
+        endforeach()
+        set_target_properties(
+            libmlvc
+            PROPERTIES
+                LIBMLVC_RUNTIME_FILES "${_windowsappsdk_runtime_files}"
+                INTERFACE_LIBMLVC_RUNTIME_FILES
+                    "$<BUILD_INTERFACE:${_windowsappsdk_runtime_files}>$<INSTALL_INTERFACE:${_libmlvc_install_runtime_files}>"
         )
     endif()
-    set_target_properties(
-        libmlvc
-        PROPERTIES
-            LIBMLVC_RUNTIME_FILES "${WINDOWSAPPSDK_BOOTSTRAP_DLL}"
-            INTERFACE_LIBMLVC_RUNTIME_FILES
-                "$<BUILD_INTERFACE:${WINDOWSAPPSDK_BOOTSTRAP_DLL}>;$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/bin/Microsoft.WindowsAppRuntime.Bootstrap.dll>"
-    )
 endif()
 
 # ---------------------------------------------------------------------------

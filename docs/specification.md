@@ -139,7 +139,7 @@ NALU payload following the SPS version prefix (documented above):
 | `crop_top_div2` | ue(v) | Top crop offset / 2 (present if `crop_flag == 1`) |
 | `crop_bottom_div2` | ue(v) | Bottom crop offset / 2 (present if `crop_flag == 1`) |
 | `max_temporal_layers_minus1` | u(3) | Maximum number of temporal layers minus 1. The format permits up to 8 layers; the current reference codec supports at most 2. |
-| `frame_idx_bits_minus8` | ue(v) | Frame index bit width minus 8 |
+| `frame_idx_bits_minus8` | ue(v) | Frame index bit width minus 8. The current reference codec supports widths up to 30 bits. |
 
 Display dimensions are derived from the SPS fields, where `model_width = model_width_div2 * 2`, `model_height = model_height_div2 * 2`, and crop offsets are similarly doubled:
 - When `transpose_flag == 0`: `display_width = model_width - crop_left - crop_right`, `display_height = model_height - crop_top - crop_bottom`

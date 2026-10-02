@@ -84,14 +84,15 @@ endif()
 # ---------------------------------------------------------------------------
 
 if(WIN32)
+    set(_runtime_files
+        "$<TARGET_PROPERTY:libmlvc,LIBMLVC_RUNTIME_FILES>"
+        "$<TARGET_RUNTIME_DLLS:gtest_libmlvc>"
+    )
     add_custom_command(
         TARGET gtest_libmlvc
         POST_BUILD
         COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_PROPERTY:libmlvc,LIBMLVC_RUNTIME_FILES>"
-            "$<TARGET_RUNTIME_DLLS:gtest_libmlvc>"
-            "$<TARGET_FILE_DIR:gtest_libmlvc>"
+            "$<$<BOOL:$<JOIN:${_runtime_files},>>:${CMAKE_COMMAND};-E;copy_if_different;${_runtime_files};$<TARGET_FILE_DIR:gtest_libmlvc>>"
         COMMAND_EXPAND_LISTS
         COMMENT "Copying runtime DLLs next to gtest_libmlvc"
         VERBATIM
