@@ -229,7 +229,8 @@ const int parsedHeight = frameData->DisplayHeight();
 - Git and Git LFS
 - CMake 3.30+ (4.2+ for Visual Studio 2026)
 - A C++20 toolchain
-- Windows: Visual Studio with the C++ workload, Windows SDK, and Windows App Runtime 1.8
+- Windows: Visual Studio with the C++ workload, the MSVC Spectre-mitigated libraries for the target
+  architecture, Windows SDK, and Windows App Runtime 1.8
 - macOS: Xcode, or the Command Line Tools with Ninja
 
 ### Clone
