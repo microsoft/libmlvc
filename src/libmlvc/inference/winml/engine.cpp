@@ -209,7 +209,7 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
                   ComputeUnitToString(m_params.computeUnit),
                   OnnxExecutionProviderToString(m_params.onnxExecutionProvider), WinMlInitModeToString(m_params.initMode));
 
-    auto modulesResult = LoadWinMlModules(m_params.initMode);
+    auto modulesResult = LoadWinMlModules(m_params.initMode, progressCallback);
     if (!modulesResult) {
         MLVC_LOG_ERROR("Failed to load WinML / ONNX Runtime modules");
         return modulesResult.error();
@@ -245,6 +245,13 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
         }
     }
 
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Creating ONNX Runtime environment" });
+        if (cancelToken.IsCancelled()) {
+            return make_error_code(Error::operation_cancelled);
+        }
+    }
+
     // Gets or creates OrtEnv. OrtEnv is a global ref-counted singleton
     OrtEnv* env = nullptr;
     if (auto ret = CheckOrtStatus(m_ortApi, m_ortApi->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "libmlvc", &env)); !ret) {
@@ -262,14 +269,8 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
         if (progressCallback) {
             progressCallback(StatusMessage{ "Ensuring execution provider is ready" });
         }
-        auto ret = EnsureExecutionProviderReady(
-            m_winMlApi, m_ortApi, m_ortEnv.get(), m_params.onnxExecutionProvider, cancelToken,
-            [&progressCallback](double progress) {
-                if (progressCallback) {
-                    progressCallback(StatusMessage{
-                        "Downloading execution provider: " + std::to_string(static_cast<int>(progress)) + "%" });
-                }
-            });
+        auto ret = EnsureExecutionProviderReady(m_winMlApi, m_ortApi, m_ortEnv.get(), m_params.onnxExecutionProvider,
+                                                cancelToken, progressCallback);
         if (!ret) {
             MLVC_LOG_ERROR("Failed to ensure %s execution provider is ready: %s",
                            OnnxExecutionProviderToString(m_params.onnxExecutionProvider), ret.error().message().c_str());
@@ -444,6 +445,78 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
 
 WinMlInferenceEngine::~WinMlInferenceEngine() {}
 
+static constexpr auto kCachedModelFilename = "model.onnx";
+
+expected<InferenceSessionPtr>
+WinMlInferenceEngine::CreateSession(std::string_view name, std::span<const std::byte> modelData,
+                                    const std::map<std::string, std::span<const std::byte>>& weightsData,
+                                    std::string_view cacheKey, const std::optional<std::string>& functionName)
+{
+    if (functionName) {
+        MLVC_LOG_ERROR("[%.*s] ONNX Runtime doesn't support function selection (function '%s')",
+                       static_cast<int>(name.size()), name.data(), functionName->c_str());
+        return make_error_code(Error::invalid_argument);
+    }
+
+    std::lock_guard lock(m_mutex);
+
+    // 1. Serialize session creation: creating sessions with non-CPU EPs is not thread-safe
+    std::unique_lock globalLock{ g_ortCreateSessionMutex, std::defer_lock };
+    if (m_params.onnxExecutionProvider != OnnxExecutionProvider::CPU) {
+        globalLock.lock();
+    }
+
+    // 2. Load from the EP context cache, compiling the model into it if not cached
+    if (!cacheKey.empty() && SupportsEpContextCaching()) {
+        const auto fullCacheKey = FullCacheKey(cacheKey);
+        MLVC_LOG_DEBUG("EP context caching enabled for model '%.*s' with key '%s'", static_cast<int>(name.size()),
+                       name.data(), fullCacheKey.c_str());
+        return CreateSessionFromCache(name, modelData, weightsData, fullCacheKey);
+    }
+
+    // 3. Otherwise create the session from the model in memory
+    return CreateSessionFromArray(name, modelData, weightsData);
+}
+
+expected<bool> WinMlInferenceEngine::PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
+                                                       const std::map<std::string, std::span<const std::byte>>& weightsData,
+                                                       std::string_view cacheKey)
+{
+    if (modelData.empty() || cacheKey.empty()) {
+        MLVC_LOG_ERROR("[%.*s] Model data and cache key are required", static_cast<int>(name.size()), name.data());
+        return make_error_code(Error::invalid_argument);
+    }
+    if (!SupportsEpContextCaching()) {
+        return false;
+    }
+
+    std::lock_guard lock(m_mutex);
+
+    auto& cache = libmlvc::ModelCache::Instance();
+    const auto fullCacheKey = FullCacheKey(cacheKey);
+
+    // 1. Skip compilation if the model is already cached
+    std::error_code ec;
+    if (auto cacheDirResult = cache.LocateCacheDir(fullCacheKey);
+        cacheDirResult && std::filesystem::is_regular_file(cacheDirResult.value() / kCachedModelFilename, ec)) {
+        return true;
+    }
+
+    // 2. Create an empty cache directory and compile the model into it
+    auto cacheDirResult = cache.CreateCacheDir(fullCacheKey);
+    if (!cacheDirResult) return cacheDirResult.error();
+    const auto modelPath = cacheDirResult.value() / kCachedModelFilename;
+    std::lock_guard globalLock(g_ortCreateSessionMutex);  // Creating sessions with non-CPU EPs is not thread-safe
+    if (auto ret = CompileModelToEpContext(name, modelData, weightsData, modelPath); !ret) {
+        cache.DeleteCacheDir(fullCacheKey);
+        return ret.error();
+    }
+
+    // 3. Trigger cleanup
+    cache.CleanupCacheDirs();
+    return true;
+}
+
 expected<OrtSessionOptionsPtr> WinMlInferenceEngine::CreateConfiguredSessionOptions()
 {
     const char* ortProviderName = OnnxExecutionProviderToOrtName(m_params.onnxExecutionProvider);
@@ -482,6 +555,11 @@ expected<OrtSessionOptionsPtr> WinMlInferenceEngine::CreateConfiguredSessionOpti
             MLVC_LOG_ERROR("Failed to set session config: %s", ret.error().c_str());
             return make_error_code(Error::model_init_error);
         }
+        // The EP runs the whole model, so ORT's intra-op thread pool would only idle; one thread saves its memory
+        if (auto ret = CheckOrtStatus(m_ortApi, m_ortApi->SetIntraOpNumThreads(sessionOptions, 1)); !ret) {
+            MLVC_LOG_ERROR("Failed to set intra-op thread count: %s", ret.error().c_str());
+            return make_error_code(Error::model_init_error);
+        }
     }
 
     // Append EP with options using V2 API
@@ -513,37 +591,14 @@ expected<OrtSessionOptionsPtr> WinMlInferenceEngine::CreateConfiguredSessionOpti
 }
 
 expected<InferenceSessionPtr>
-WinMlInferenceEngine::CreateSession(std::string_view name, std::span<const std::byte> modelData,
-                                    const std::map<std::string, std::span<const std::byte>>& weightsData,
-                                    std::string_view cacheKey, const std::optional<std::string>& functionName)
-{
-    (void)functionName;  // ONNX Runtime doesn't support function selection
-
-    std::lock_guard lock(m_mutex);
-
-    // Creating sessions with non-CPU EPs is not thread-safe
-    std::unique_lock globalLock{ g_ortCreateSessionMutex, std::defer_lock };
-    if (m_params.onnxExecutionProvider != OnnxExecutionProvider::CPU) {
-        globalLock.lock();
-    }
-
-    // Check if we should use EP context caching
-    const bool useEpContextCache = !cacheKey.empty() && SupportsEpContextCaching();
-
-    if (useEpContextCache) {
-        const auto fullCacheKey = m_envHash + "_" + std::string(cacheKey);
-        MLVC_LOG_DEBUG("EP context caching enabled for model '%.*s' with key '%s'", static_cast<int>(name.size()),
-                       name.data(), fullCacheKey.c_str());
-        return CreateSessionFromEpContext(name, modelData, weightsData, fullCacheKey);
-    }
-
-    return CreateSessionFromArray(name, modelData, weightsData);
-}
-
-expected<InferenceSessionPtr>
 WinMlInferenceEngine::CreateSessionFromArray(std::string_view name, std::span<const std::byte> modelData,
                                              const std::map<std::string, std::span<const std::byte>>& weightsData)
 {
+    if (modelData.empty()) {
+        MLVC_LOG_ERROR("[%.*s] Model data is required without a model cache", static_cast<int>(name.size()), name.data());
+        return make_error_code(Error::invalid_argument);
+    }
+
     auto sessionOptionsResult = CreateConfiguredSessionOptions();
     if (!sessionOptionsResult) {
         return sessionOptionsResult.error();
@@ -574,64 +629,49 @@ WinMlInferenceEngine::CreateSessionFromArray(std::string_view name, std::span<co
     return WinMlInferenceSession::Create(name, std::move(sessionPtr), m_ortApi, m_epMemoryInfo);
 }
 
-// --------------------------------------------------------------------------------------------
-// EP Context Caching Implementation
-// --------------------------------------------------------------------------------------------
-
-static constexpr auto kCachedModelFilename = "model.onnx";
-
-bool WinMlInferenceEngine::SupportsEpContextCaching() const
-{
-    if (m_hwDeviceType != OrtHardwareDeviceType_NPU) {
-        return false;
-    }
-    return m_params.onnxExecutionProvider == OnnxExecutionProvider::OPENVINO
-           || m_params.onnxExecutionProvider == OnnxExecutionProvider::QNN;
-}
-
 expected<InferenceSessionPtr>
-WinMlInferenceEngine::CreateSessionFromEpContext(std::string_view name, std::span<const std::byte> modelData,
-                                                 const std::map<std::string, std::span<const std::byte>>& weightsData,
-                                                 std::string_view cacheKey)
+WinMlInferenceEngine::CreateSessionFromCache(std::string_view name, std::span<const std::byte> modelData,
+                                             const std::map<std::string, std::span<const std::byte>>& weightsData,
+                                             std::string_view cacheKey)
 {
     auto& cache = libmlvc::ModelCache::Instance();
 
     // 1. Try to load from existing cache
-    if (auto cacheDirResult = cache.LocateCacheDir(cacheKey)) {
+    std::error_code ec;
+    if (auto cacheDirResult = cache.LocateCacheDir(cacheKey);
+        cacheDirResult && std::filesystem::is_regular_file(cacheDirResult.value() / kCachedModelFilename, ec)) {
         MLVC_LOG_INFO("[%.*s] Found cached EP context at '%s'", static_cast<int>(name.size()), name.data(),
                       std::string(cacheKey).c_str());
 
-        if (auto sessionResult = LoadSessionFromCache(name, cacheDirResult.value())) {
+        auto sessionResult = CreateSessionFromDisk(name, cacheDirResult.value() / kCachedModelFilename);
+        if (sessionResult) {
             cache.CleanupCacheDirs();  // Trigger cleanup after successful load
             MLVC_LOG_INFO("[%.*s] Successfully loaded session from EP context cache", static_cast<int>(name.size()),
                           name.data());
             return sessionResult;
         }
-
-        // Cache exists but load failed - delete and recompile
-        MLVC_LOG_WARN("[%.*s] Failed to load from cache, recompiling model", static_cast<int>(name.size()), name.data());
-        cache.DeleteCacheDir(cacheKey);
+        if (modelData.empty()) {
+            MLVC_LOG_ERROR("[%.*s] Failed to load from cache", static_cast<int>(name.size()), name.data());
+            return sessionResult.error();
+        }
+        MLVC_LOG_WARN("[%.*s] Failed to load from cache, recompiling", static_cast<int>(name.size()), name.data());
+    } else if (modelData.empty()) {
+        MLVC_LOG_ERROR("[%.*s] No EP context '%s' in the model cache", static_cast<int>(name.size()), name.data(),
+                       std::string(cacheKey).c_str());
+        return make_error_code(Error::model_init_error);
     }
 
     // 2. Create cache directory and compile model to EP context
     auto cacheDirResult = cache.CreateCacheDir(cacheKey);
-    if (!cacheDirResult) {
-        MLVC_LOG_WARN("[%.*s] Failed to create cache directory, falling back to non-cached session",
-                      static_cast<int>(name.size()), name.data());
-        return CreateSessionFromArray(name, modelData, weightsData);
-    }
-
-    if (auto ret = CompileModelToEpContext(name, modelData, weightsData, cacheDirResult.value()); !ret) {
-        MLVC_LOG_WARN("[%.*s] Failed to compile model to EP context: %s", static_cast<int>(name.size()), name.data(),
-                      ret.error().message().c_str());
+    if (!cacheDirResult) return cacheDirResult.error();
+    const auto modelPath = cacheDirResult.value() / kCachedModelFilename;
+    if (auto ret = CompileModelToEpContext(name, modelData, weightsData, modelPath); !ret) {
         cache.DeleteCacheDir(cacheKey);
-        return CreateSessionFromArray(name, modelData, weightsData);
+        return ret.error();
     }
-    MLVC_LOG_DEBUG("[%.*s] Successfully compiled EP context with cache key '%s'", static_cast<int>(name.size()),
-                   name.data(), std::string(cacheKey).c_str());
 
-    // 3. Load from freshly created cache (Intel recommendation)
-    auto sessionResult = LoadSessionFromCache(name, cacheDirResult.value());
+    // 3. Load from freshly created cache
+    auto sessionResult = CreateSessionFromDisk(name, modelPath);
     if (!sessionResult) {
         MLVC_LOG_ERROR("[%.*s] Failed to load from freshly compiled cache", static_cast<int>(name.size()), name.data());
         cache.DeleteCacheDir(cacheKey);
@@ -646,9 +686,40 @@ WinMlInferenceEngine::CreateSessionFromEpContext(std::string_view name, std::spa
     return sessionResult;
 }
 
+expected<InferenceSessionPtr> WinMlInferenceEngine::CreateSessionFromDisk(std::string_view name,
+                                                                          const std::filesystem::path& modelPath)
+{
+    auto sessionOptionsResult = CreateConfiguredSessionOptions();
+    if (!sessionOptionsResult) {
+        return sessionOptionsResult.error();
+    }
+    auto sessionOptionsPtr = std::move(sessionOptionsResult.value());
+
+    // Load by file path so the EP can resolve relative auxiliary files (e.g., OpenVINO .blob files).
+    std::wstring modelPathW = modelPath.wstring();
+    MLVC_LOG_DEBUG("[%.*s] Creating ORT session from file '%s'", static_cast<int>(name.size()), name.data(),
+                   (modelPath.parent_path().filename() / modelPath.filename()).string().c_str());
+
+    OrtSession* session = nullptr;
+    if (auto ret = CheckOrtStatus(
+            m_ortApi, m_ortApi->CreateSession(m_ortEnv.get(), modelPathW.c_str(), sessionOptionsPtr.get(), &session));
+        !ret) {
+        MLVC_LOG_ERROR("[%.*s] Session creation from file failed: %s", static_cast<int>(name.size()), name.data(),
+                       ret.error().c_str());
+        return make_error_code(Error::model_init_error);
+    }
+
+    auto sessionPtr = MakeOrtSession(m_ortApi, session);
+    return WinMlInferenceSession::Create(name, std::move(sessionPtr), m_ortApi, m_epMemoryInfo);
+}
+
+// --------------------------------------------------------------------------------------------
+// EP Context Caching Implementation
+// --------------------------------------------------------------------------------------------
+
 expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view name, std::span<const std::byte> modelData,
                                                              const std::map<std::string, std::span<const std::byte>>& weightsData,
-                                                             const std::filesystem::path& modelCacheDir)
+                                                             const std::filesystem::path& modelPath)
 {
     auto sessionOptionsResult = CreateConfiguredSessionOptions();
     if (!sessionOptionsResult) {
@@ -657,7 +728,8 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
     auto sessionOptionsPtr = std::move(sessionOptionsResult.value());
 
     // Configure EP context options
-    auto contextFilePath = (modelCacheDir / kCachedModelFilename).string();
+    const auto contextFilePathU8 = modelPath.u8string();
+    const auto contextFilePath = std::string(contextFilePathU8.begin(), contextFilePathU8.end());
 
     // Enable EP context generation
     if (auto ret =
@@ -683,8 +755,6 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
         return make_error_code(Error::model_init_error);
     }
 
-    MLVC_LOG_DEBUG("EP context cache dir: %s", modelCacheDir.filename().string().c_str());
-
     // Add external weights if provided
     if (auto ret = AddExternalWeightsToSessionOptions(m_ortApi, sessionOptionsPtr.get(), weightsData); !ret) {
         return ret.error();
@@ -702,70 +772,32 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
         return make_error_code(Error::model_init_error);
     }
 
-    // Release the compilation session - we'll load from cache (Intel recommendation)
+    // Release the compilation session
     m_ortApi->ReleaseSession(session);
 
     // Verify the cache file was created
     std::error_code ec;
-    if (!std::filesystem::exists(modelCacheDir / kCachedModelFilename, ec)) {
+    if (!std::filesystem::is_regular_file(modelPath, ec)) {
         MLVC_LOG_ERROR("EP context file was not created at expected path");
         return make_error_code(Error::model_init_error);
-    }
-
-    // Log all files created in the cache directory for debugging
-    MLVC_LOG_DEBUG("Cache directory contents after EP context compilation:");
-    for (const auto& entry : std::filesystem::directory_iterator(modelCacheDir, ec)) {
-        if (!ec) {
-            auto fileSize = std::filesystem::file_size(entry.path(), ec);
-            MLVC_LOG_DEBUG("  - %s (%zu bytes)", entry.path().filename().string().c_str(),
-                           ec ? 0 : static_cast<size_t>(fileSize));
-        }
     }
 
     MLVC_LOG_DEBUG("[%.*s] EP context compiled successfully", static_cast<int>(name.size()), name.data());
     return {};
 }
 
-expected<InferenceSessionPtr> WinMlInferenceEngine::LoadSessionFromCache(std::string_view name,
-                                                                         const std::filesystem::path& modelCacheDir)
+bool WinMlInferenceEngine::SupportsEpContextCaching() const
 {
-    auto cachedModelPath = modelCacheDir / kCachedModelFilename;
-
-    // Log cache directory contents for debugging
-    std::error_code ec;
-    MLVC_LOG_DEBUG("Cache directory contents:");
-    for (const auto& entry : std::filesystem::directory_iterator(modelCacheDir, ec)) {
-        if (!ec) {
-            auto fileSize = std::filesystem::file_size(entry.path(), ec);
-            MLVC_LOG_DEBUG("  - %s (%zu bytes)", entry.path().filename().string().c_str(),
-                           ec ? 0 : static_cast<size_t>(fileSize));
-        }
+    if (m_hwDeviceType != OrtHardwareDeviceType_NPU) {
+        return false;
     }
+    return m_params.onnxExecutionProvider == OnnxExecutionProvider::OPENVINO
+           || m_params.onnxExecutionProvider == OnnxExecutionProvider::QNN;
+}
 
-    auto sessionOptionsResult = CreateConfiguredSessionOptions();
-    if (!sessionOptionsResult) {
-        return sessionOptionsResult.error();
-    }
-    auto sessionOptionsPtr = std::move(sessionOptionsResult.value());
-
-    // IMPORTANT: Load from FILE PATH, not from memory!
-    // EP context creates auxiliary files (e.g., .blob for OpenVINO) alongside the ONNX file,
-    // and they are referenced by relative path. Loading from memory breaks this.
-    std::wstring cachedModelPathW = cachedModelPath.wstring();
-    MLVC_LOG_DEBUG("[%.*s] Loading cached EP context from cache dir: %s", static_cast<int>(name.size()), name.data(),
-                   modelCacheDir.filename().string().c_str());
-
-    OrtSession* session = nullptr;
-    if (auto ret = CheckOrtStatus(m_ortApi, m_ortApi->CreateSession(m_ortEnv.get(), cachedModelPathW.c_str(),
-                                                                    sessionOptionsPtr.get(), &session));
-        !ret) {
-        MLVC_LOG_ERROR("[%.*s] Failed to load session from cache: %s", static_cast<int>(name.size()), name.data(),
-                       ret.error().c_str());
-        return make_error_code(Error::model_init_error);
-    }
-
-    auto sessionPtr = MakeOrtSession(m_ortApi, session);
-    return WinMlInferenceSession::Create(name, std::move(sessionPtr), m_ortApi, m_epMemoryInfo);
+std::string WinMlInferenceEngine::FullCacheKey(std::string_view cacheKey) const
+{
+    return m_envHash + "_" + std::string(cacheKey);
 }
 
 }  // namespace libmlvc_winml

@@ -14,6 +14,8 @@ target_sources(
         benchmark_runner.cpp
         benchmark_runner.hpp
         main.cpp
+        metrics_collector.cpp
+        metrics_collector.hpp
         reporting.cpp
         reporting.hpp
 )

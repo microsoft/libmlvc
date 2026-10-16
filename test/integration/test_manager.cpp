@@ -14,11 +14,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 using namespace libmlvc;
@@ -82,9 +85,9 @@ class ManagerTests : public ::testing::Test {
 protected:
     ManagerTests()
     {
-        // To speed up tests, disable session caching
+        // To speed up tests, disable session preloading
         m_managerParams.computeUnit = GetTestConfig().computeUnit;
-        m_managerParams.enableSessionCaching = false;
+        m_managerParams.enableSessionPreloading = false;
         m_managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
     }
 
@@ -107,6 +110,26 @@ TEST_F(ManagerTests, CreateFromDirectory)
     }
 
     ASSERT_EQ(managerCopy->GetAvailableVersions(), std::vector{ m_mlvcVersion });
+}
+
+TEST_F(ManagerTests, ReportsInferenceBackendReadyBeforeLoadingBundles)
+{
+    std::vector<std::string> events;
+    auto manager = MlvcManager::CreateFromDirectory(
+        m_managerParams, {}, std::array{ m_mlvcVersion }, {}, [&](const InitializeProgressEvent& event) {
+            if (std::holds_alternative<InferenceBackendReady>(event)) {
+                events.emplace_back("(backend ready)");
+            } else if (const auto* status = std::get_if<StatusMessage>(&event)) {
+                events.push_back(status->message);
+            }
+        });
+    ASSERT_TRUE(manager) << manager.error().message();
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front(), "Setting up inference engine");
+    ASSERT_EQ(std::ranges::count(events, "(backend ready)"), 1);
+    const auto ready = std::ranges::find(events, "(backend ready)");
+    ASSERT_NE(std::next(ready), events.end());
+    EXPECT_EQ(*std::next(ready), "Reading model bundles");
 }
 
 TEST_F(ManagerTests, CodecsOutliveManagerHandles)
@@ -161,6 +184,17 @@ TEST_F(ManagerTests, CreateFromBlobs)
         MlvcManager::CreateFromBlobs(m_managerParams, std::array{ std::span<const std::byte>{ bundleBytes.value() } });
     ASSERT_TRUE(manager) << manager.error().message();
     ASSERT_EQ(manager.value().GetAvailableVersions(), std::vector{ m_mlvcVersion });
+
+    // The manager doesn't need the blobs after it's created
+    std::ranges::fill(bundleBytes.value(), std::byte{ 0 });
+    auto config = manager.value().GetDefaultEncoderConfig(m_mlvcVersion);
+    ASSERT_TRUE(config) << config.error().message();
+    config.value().SetSize(320, 180);
+    auto encoder = manager.value().CreateEncoder(config.value());
+    ASSERT_TRUE(encoder) << encoder.error().message();
+    const auto frame = std::vector<std::byte>(320 * 180 * 3 / 2, std::byte{ 128 });
+    auto encoded = encoder.value().Encode(Nv12FrameView{ 320, 180, frame });
+    EXPECT_TRUE(encoded) << encoded.error().message();
 }
 
 TEST_F(ManagerTests, CancelCreateFromDirectory)
@@ -169,7 +203,7 @@ TEST_F(ManagerTests, CancelCreateFromDirectory)
         CancelToken cancelToken;
 
         ManagerParams params = m_managerParams;
-        params.enableSessionCaching = true;  // Keep initialization on the cancellable path.
+        params.enableSessionPreloading = true;  // Keep initialization on the cancellable path.
 
         std::mutex progressMutex;
         std::condition_variable progressCv;
@@ -234,6 +268,29 @@ TEST_F(ManagerTests, CancelCreateFromDirectory)
 
     runCancellationScenario(true);
     runCancellationScenario(false);
+}
+
+TEST_F(ManagerTests, CancelDuringBundleInitialization)
+{
+    for (const std::string_view step :
+         { "Reading model bundles", "Preparing model cache for", "Preloading session for" }) {
+        SCOPED_TRACE(step);
+        CancelToken cancelToken;
+        bool stepReached = false;
+        auto progressCallback = [&](const libmlvc::InitializeProgressEvent& event) {
+            const auto* status = std::get_if<libmlvc::StatusMessage>(&event);
+            if (status && status->message.starts_with(step)) {
+                stepReached = true;
+                cancelToken.Cancel();
+            }
+        };
+        auto params = m_managerParams;
+        params.enableSessionPreloading = true;
+        auto manager = MlvcManager::CreateFromDirectory(params, {}, {}, cancelToken, progressCallback);
+        EXPECT_TRUE(stepReached);
+        ASSERT_FALSE(manager);
+        EXPECT_EQ(manager.error(), make_error_code(Error::operation_cancelled));
+    }
 }
 
 // -----------------------------------------------------------------------------

@@ -127,6 +127,7 @@ class OpTimerStats {
 public:
     void Append(double durationMs)
     {
+        if (m_count == 0) m_firstMs = durationMs;
         m_latestMs = durationMs;
         m_totalMs += durationMs;
         m_sumSquaredMs += durationMs * durationMs;
@@ -135,6 +136,7 @@ public:
         m_count++;
     }
 
+    double FirstMs() const { return m_firstMs; }
     double LatestMs() const { return m_latestMs; }
     double TotalMs() const { return m_totalMs; }
     double SumSquaredMs() const { return m_sumSquaredMs; }
@@ -150,9 +152,11 @@ public:
     }
 
     /// Reconstructs timing statistics from aggregate values in accessor order.
-    static OpTimerStats FromState(double latestMs, double totalMs, double sumSquaredMs, double minMs, double maxMs, int count)
+    static OpTimerStats FromState(double firstMs, double latestMs, double totalMs, double sumSquaredMs, double minMs,
+                                  double maxMs, int count)
     {
         OpTimerStats s;
+        s.m_firstMs = firstMs;
         s.m_latestMs = latestMs;
         s.m_totalMs = totalMs;
         s.m_sumSquaredMs = sumSquaredMs;
@@ -163,6 +167,7 @@ public:
     }
 
 private:
+    double m_firstMs{};
     double m_latestMs{};
     double m_totalMs{};
     double m_sumSquaredMs{};
@@ -466,9 +471,12 @@ struct WindowsAppRuntimeEPInfoAvailable {
     std::optional<uint32_t> downloadTimeMs;  ///< Download duration in milliseconds, when measured.
 };
 
+/// The inference backend is initialized.
+struct InferenceBackendReady {};
+
 /// Platform-dependent initialization progress event.
 using InitializeProgressEvent =
-    std::variant<StatusMessage, WindowsAppRuntimeVersionAvailable, WindowsAppRuntimeEPInfoAvailable>;
+    std::variant<StatusMessage, WindowsAppRuntimeVersionAvailable, WindowsAppRuntimeEPInfoAvailable, InferenceBackendReady>;
 
 /// Callback receiving initialization progress events.
 ///
@@ -482,7 +490,7 @@ struct ManagerParams {
     ComputeUnit computeUnit{ ComputeUnit::NPU };  ///< Inference compute unit to request.
     std::filesystem::path cacheDir{};             ///< Root cache directory; empty selects a platform default.
     bool enableModelCache{ true };                ///< Enables persistent caching of compiled inference models.
-    bool enableSessionCaching{ true };  ///< Creates sessions during initialization and retains them for reuse.
+    bool enableSessionPreloading{ true };  ///< Creates sessions during initialization and retains them for reuse.
     WinMlInitMode winmlInitMode{ WinMlInitMode::AppSdk };  ///< Windows ML deployment mode; ignored outside Windows.
 };
 
@@ -499,8 +507,8 @@ struct Capabilities {
 /// Windows App Runtime and ONNX fields are meaningful only for `InferenceBackend::WINDOWSML`.
 /// Version and driver strings are empty when unavailable.
 struct ManagerInfo {
-    bool enableModelCache{};      ///< Whether model caching is enabled.
-    bool enableSessionCaching{};  ///< Whether inference session caching is enabled.
+    bool enableModelCache{};         ///< Whether model caching is enabled.
+    bool enableSessionPreloading{};  ///< Whether session preloading is enabled.
 
     InferenceBackend inferenceBackend{ InferenceBackend::WINDOWSML };  ///< Initialized inference backend.
     ModelType modelType{ ModelType::UNKNOWN };                         ///< Loaded model format.

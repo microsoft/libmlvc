@@ -119,7 +119,7 @@ void StatsDump::Save(std::string_view filename)
 }
 
 BaseBenchmarkRunner::BaseBenchmarkRunner(std::string_view name, const BenchmarkArguments& args,
-                                         const MlvcManager& manager, const size_t numFrames, StatsDump& dump,
+                                         const MlvcManager& manager, const size_t numFrames, StatsDump* dump,
                                          BenchmarkResults& benchmarkResults, std::atomic<bool>& stopFlag)
     : m_name(name)
     , m_args(args)
@@ -177,7 +177,9 @@ void BaseBenchmarkRunner::ThreadFunc()
             const auto timestamp = std::chrono::system_clock::now();
 
             ProcessFrame(i % m_numFrames);
-            DumpStats(timestamp);
+            if (m_dump) {
+                DumpStats(timestamp);
+            }
 
             // Wait to match target fps
             if (m_args.targetFps < 999.0) {
@@ -203,7 +205,7 @@ void BaseBenchmarkRunner::ThreadFunc()
 
 EncoderBenchmarkRunner::EncoderBenchmarkRunner(std::string_view name, const BenchmarkArguments& args,
                                                const MlvcManager& manager, const std::vector<Nv12Frame>& frames,
-                                               StatsDump& dump, BenchmarkResults& benchmarkResults,
+                                               StatsDump* dump, BenchmarkResults& benchmarkResults,
                                                std::atomic<bool>& stopFlag)
     : BaseBenchmarkRunner(name, args, manager, frames.size(), dump, benchmarkResults, stopFlag), m_frames(frames)
 {
@@ -250,7 +252,7 @@ void EncoderBenchmarkRunner::ProcessFrame(const size_t frameIndex)
 void EncoderBenchmarkRunner::DumpStats(const std::chrono::system_clock::time_point& timestamp)
 {
     const auto& stats = m_encoder->GetStats();
-    m_dump.DumpStats(m_name, timestamp, stats);
+    m_dump->DumpStats(m_name, timestamp, stats);
 }
 
 void EncoderBenchmarkRunner::SaveBenchmarkResults(double avgFps)
@@ -261,25 +263,27 @@ void EncoderBenchmarkRunner::SaveBenchmarkResults(double avgFps)
 
 DecoderBenchmarkRunner::DecoderBenchmarkRunner(std::string_view name, const BenchmarkArguments& args,
                                                const MlvcManager& manager,
-                                               const std::vector<MlvcAccessUnit>& accessUnits, StatsDump& dump,
+                                               const std::vector<MlvcAccessUnit>& accessUnits, StatsDump* dump,
                                                BenchmarkResults& benchmarkResults, std::atomic<bool>& stopFlag)
     : BaseBenchmarkRunner(name, args, manager, accessUnits.size(), dump, benchmarkResults, stopFlag)
     , m_accessUnits(accessUnits)
 {
 }
 
+expected<void> DecoderBenchmarkRunner::Initialize()
+{
+    auto decoder = m_manager.CreateDecoder();
+    if (!decoder) {
+        std::cerr << "Error: BenchmarkRunner(" << m_name << "): Failed to create decoder: " << decoder.error().message()
+                  << '\n';
+        return decoder.error();
+    }
+    m_decoder = std::move(decoder.value());
+    return {};
+}
+
 void DecoderBenchmarkRunner::ProcessFrame(const size_t frameIndex)
 {
-    if (!m_decoder) {
-        auto decoder = m_manager.CreateDecoder();
-        if (!decoder) {
-            std::cerr << "Fatal: BenchmarkRunner(" << m_name
-                      << "): Failed to initialize decoder: " << decoder.error().message() << '\n';
-            std::abort();
-        }
-        m_decoder = std::move(decoder.value());
-    }
-
     auto decodeRes = m_decoder->Decode(m_accessUnits[frameIndex].data);
     if (!decodeRes) {
         std::cerr << "Fatal: BenchmarkRunner(" << m_name << "): Failed to decode frame: " << decodeRes.error().message()
@@ -291,12 +295,11 @@ void DecoderBenchmarkRunner::ProcessFrame(const size_t frameIndex)
 void DecoderBenchmarkRunner::DumpStats(const std::chrono::system_clock::time_point& timestamp)
 {
     const auto& stats = m_decoder->GetStats();
-    m_dump.DumpStats(m_name, timestamp, stats);
+    m_dump->DumpStats(m_name, timestamp, stats);
 }
 
 void DecoderBenchmarkRunner::SaveBenchmarkResults(double avgFps)
 {
-    if (!m_decoder) return;
     const auto& stats = m_decoder->GetStats();
     m_benchmarkResults.Add(m_name, stats, avgFps);
 }

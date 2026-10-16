@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include "libmlvc/common/macros.hpp"
 #include "libmlvc/inference/model_cache.hpp"
 
 #include <gtest/gtest.h>
@@ -79,7 +80,7 @@ TEST_F(UnitTestModelCache, CreateLocateDelete)
     ASSERT_TRUE(cache.DeleteCacheDir("nonexistent"));
 }
 
-TEST_F(UnitTestModelCache, CreateDuplicateKeyOverwritesTimestamp)
+TEST_F(UnitTestModelCache, CreateExistingKeyReplacesDir)
 {
     auto& cache = ModelCache::Instance();
     const std::string key = "dup_key";
@@ -88,15 +89,19 @@ TEST_F(UnitTestModelCache, CreateDuplicateKeyOverwritesTimestamp)
     auto result = cache.CreateCacheDir(key);
     ASSERT_TRUE(result);
 
-    // Backdate the timestamp
+    // Backdate the timestamp and leave a file behind
     WriteAccessTime(result.value(), 1000);
+    const auto staleFile = result.value() / "stale.bin";
+    {
+        const auto file = std::ofstream{ staleFile };
+        ASSERT_TRUE(file);
+    }
 
-    // Re-create with same key — should overwrite timestamp
+    // Re-create with same key: an empty directory with a refreshed timestamp
     auto result2 = cache.CreateCacheDir(key);
     ASSERT_TRUE(result2);
     ASSERT_EQ(result2.value(), result.value());
-
-    // Read back timestamp and verify it was refreshed
+    EXPECT_FALSE(std::filesystem::exists(staleFile));
     ASSERT_GT(ReadAccessTime(result.value()), 1000);
 }
 
@@ -130,6 +135,33 @@ TEST_F(UnitTestModelCache, CleanupExpiredAndStaleCaches)
     ASSERT_FALSE(std::filesystem::exists(expiredResult.value(), ec)) << ec.message();
     ASSERT_FALSE(std::filesystem::exists(stalePath, ec)) << ec.message();
 }
+
+#if defined(MLVC_PLATFORM_WINCLASSIC)
+TEST_F(UnitTestModelCache, CleanupSkipsUndeletableDirs)
+{
+    auto& cache = ModelCache::Instance();
+    // Names outside the ANSI code page must not make logging a failed delete throw
+    const auto staleDir = m_testCacheDir / L"stale_\u65e5";
+    const auto expiredDir = m_testCacheDir / L"expired_\u65e5";
+    ASSERT_TRUE(std::filesystem::create_directories(staleDir));
+    ASSERT_TRUE(std::filesystem::create_directories(expiredDir));
+    WriteAccessTime(expiredDir, 1000);
+    auto deletableResult = cache.CreateCacheDir("expired");
+    ASSERT_TRUE(deletableResult);
+    WriteAccessTime(deletableResult.value(), 1000);
+
+    // Windows only: streams hold the file without delete sharing, so these directories can't be deleted
+    const auto staleLock = std::ofstream{ staleDir / "locked.bin" };
+    const auto expiredLock = std::ofstream{ expiredDir / "locked.bin" };
+    ASSERT_TRUE(staleLock);
+    ASSERT_TRUE(expiredLock);
+
+    ASSERT_TRUE(cache.CleanupCacheDirs(kRetention, true));
+    EXPECT_TRUE(std::filesystem::exists(staleDir));
+    EXPECT_TRUE(std::filesystem::exists(expiredDir));
+    EXPECT_FALSE(std::filesystem::exists(deletableResult.value()));
+}
+#endif
 
 TEST_F(UnitTestModelCache, CleanupThrottleSkipsWhenNotForced)
 {

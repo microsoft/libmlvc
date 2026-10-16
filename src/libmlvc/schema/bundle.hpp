@@ -21,6 +21,7 @@ enum struct DecoderInterfaceType { FP16_SCALE_SENDING_NO_RESET_1P };
 enum struct ScaleDecoderType {
     UPSAMPLE,
 };
+enum struct TensorLayout { NCHW, NHWC };
 
 const char* TargetDeviceToString(TargetDevice device);
 const char* ModelPartIdToString(const ModelPartId modelType);
@@ -68,6 +69,8 @@ struct ModelMetadata {
     std::optional<int> ltrStartIdx;
     std::optional<int> ltrPeriod;
     std::optional<std::vector<int>> qpMapping;
+    TensorLayout imageLayout{ TensorLayout::NCHW };
+    TensorLayout featureLayout{ TensorLayout::NCHW };
 };
 
 struct BundleManifest {
