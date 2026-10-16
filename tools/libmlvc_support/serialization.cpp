@@ -277,7 +277,7 @@ void tag_invoke(boost::json::value_from_tag, boost::json::value& jv, const Manag
 {
     jv = {
         { "enable_model_cache", c.enableModelCache },
-        { "enable_session_caching", c.enableSessionCaching },
+        { "enable_session_preloading", c.enableSessionPreloading },
         { "inference_backend", InferenceBackendToString(c.inferenceBackend) },
         { "model_type", ModelTypeToString(c.modelType) },
         { "compute_unit", ComputeUnitToString(c.computeUnit) },
@@ -332,8 +332,10 @@ void tag_invoke(boost::json::value_from_tag, boost::json::value& jv, const Aggre
 void tag_invoke(boost::json::value_from_tag, boost::json::value& jv, const OpTimerStats& t)
 {
     jv = {
-        { "latest_ms", t.LatestMs() }, { "total_ms", t.TotalMs() }, { "sum_squared_ms", t.SumSquaredMs() },
-        { "min_ms", t.MinMs() },       { "max_ms", t.MaxMs() },     { "count", t.Count() },
+        { "first_ms", t.FirstMs() }, { "latest_ms", t.LatestMs() },
+        { "total_ms", t.TotalMs() }, { "sum_squared_ms", t.SumSquaredMs() },
+        { "min_ms", t.MinMs() },     { "max_ms", t.MaxMs() },
+        { "count", t.Count() },
     };
 }
 
@@ -462,7 +464,7 @@ tag_invoke(const boost::json::try_value_to_tag<ManagerInfo>&, const boost::json:
     const auto& obj = jv.as_object();
     return ManagerInfo{
         .enableModelCache = GetBool(obj, "enable_model_cache"),
-        .enableSessionCaching = GetBool(obj, "enable_session_caching"),
+        .enableSessionPreloading = GetBool(obj, "enable_session_preloading"),
         .inferenceBackend = InferenceBackendFromString(GetString(obj, "inference_backend")),
         .modelType = ModelTypeFromString(GetString(obj, "model_type")),
         .computeUnit = ComputeUnitFromString(GetString(obj, "compute_unit")),
@@ -538,7 +540,7 @@ tag_invoke(const boost::json::try_value_to_tag<OpTimerStats>&, const boost::json
 {
     if (!jv.is_object()) return make_error_code(Error::json_parse_error);
     const auto& obj = jv.as_object();
-    return OpTimerStats::FromState(GetDouble(obj, "latest_ms"), GetDouble(obj, "total_ms"),
+    return OpTimerStats::FromState(GetDouble(obj, "first_ms"), GetDouble(obj, "latest_ms"), GetDouble(obj, "total_ms"),
                                    GetDouble(obj, "sum_squared_ms"), GetDouble(obj, "min_ms"), GetDouble(obj, "max_ms"),
                                    GetInt(obj, "count"));
 }

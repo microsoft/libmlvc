@@ -692,7 +692,7 @@ protected:
 
         ManagerParams managerParams;
         managerParams.computeUnit = GetTestConfig().computeUnit;
-        managerParams.enableSessionCaching = false;
+        managerParams.enableSessionPreloading = false;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
         m_manager = std::make_shared<MlvcManagerImpl>(managerParams);
         auto ret = m_manager->Initialize({}, std::array{ m_mlvcVersion });

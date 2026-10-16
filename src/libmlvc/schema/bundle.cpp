@@ -146,6 +146,17 @@ expected<ScaleDecoderType> ParseScaleDecoderType(std::string_view v)
     return make_error_code(Error::invalid_argument);
 }
 
+expected<TensorLayout> ParseTensorLayout(std::string_view value)
+{
+    if (value == "nchw") {
+        return TensorLayout::NCHW;
+    } else if (value == "nhwc") {
+        return TensorLayout::NHWC;
+    }
+    MLVC_LOG_ERROR("Unsupported tensor layout: %s", std::string(value).c_str());
+    return make_error_code(Error::invalid_argument);
+}
+
 // ----------------------------------------------------------------
 // JSON parsing helpers
 // ----------------------------------------------------------------
@@ -326,6 +337,19 @@ tag_invoke(const boost::json::try_value_to_tag<ScaleDecoderType>&, const boost::
     return ret.value();
 }
 
+boost::json::result_for<TensorLayout, boost::json::value>::type
+tag_invoke(const boost::json::try_value_to_tag<TensorLayout>&, const boost::json::value& jsonValue)
+{
+    if (!jsonValue.is_string()) {
+        MLVC_LOG_ERROR("TensorLayout JSON value is not a string");
+        return make_error_code(Error::json_parse_error);
+    }
+    const auto& layout = jsonValue.as_string();
+    const auto result = ParseTensorLayout({ layout.data(), layout.size() });
+    if (!result) return result.error();
+    return result.value();
+}
+
 boost::json::result_for<MlvcVersion, boost::json::value>::type
 tag_invoke(const boost::json::try_value_to_tag<MlvcVersion>&, const boost::json::value& jv)
 {
@@ -402,6 +426,8 @@ tag_invoke(const boost::json::try_value_to_tag<ModelMetadata>&, const boost::jso
     if (auto ec = ParseOptional(obj, "ltr_start_idx", m.ltrStartIdx); ec) return ec;
     if (auto ec = ParseOptional(obj, "ltr_period", m.ltrPeriod); ec) return ec;
     if (auto ec = ParseOptional(obj, "qp_mapping", m.qpMapping); ec) return ec;
+    if (auto ec = ParseOptional(obj, "image_layout", m.imageLayout); ec) return ec;
+    if (auto ec = ParseOptional(obj, "feature_layout", m.featureLayout); ec) return ec;
     return m;
 }
 

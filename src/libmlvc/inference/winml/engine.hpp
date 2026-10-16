@@ -29,26 +29,32 @@ public:
                                                 const std::map<std::string, std::span<const std::byte>>& weightsData,
                                                 std::string_view cacheKey,
                                                 const std::optional<std::string>& functionName = std::nullopt) override;
+    expected<bool> PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
+                                     const std::map<std::string, std::span<const std::byte>>& weightsData,
+                                     std::string_view cacheKey) override;
     const InferenceEngineInfo& GetInfo() const override { return m_info; }
 
 private:
     WinMlInferenceEngine(const WinMlEngineParams& params);
     expected<void> Initialize(CancelToken cancelToken, const InitializeProgressCallback& progressCallback);
 
-    // Common helpers for session creation
+    // Shared session configuration
     expected<OrtSessionOptionsPtr> CreateConfiguredSessionOptions();
+
+    // Session creation helpers
     expected<InferenceSessionPtr> CreateSessionFromArray(std::string_view name, std::span<const std::byte> modelData,
                                                          const std::map<std::string, std::span<const std::byte>>& weightsData);
+    expected<InferenceSessionPtr> CreateSessionFromCache(std::string_view name, std::span<const std::byte> modelData,
+                                                         const std::map<std::string, std::span<const std::byte>>& weightsData,
+                                                         std::string_view cacheKey);
+    expected<InferenceSessionPtr> CreateSessionFromDisk(std::string_view name, const std::filesystem::path& modelPath);
 
-    // EP context caching helpers
-    bool SupportsEpContextCaching() const;
-    expected<InferenceSessionPtr> CreateSessionFromEpContext(std::string_view name, std::span<const std::byte> modelData,
-                                                             const std::map<std::string, std::span<const std::byte>>& weightsData,
-                                                             std::string_view cacheKey);
+    // EP context compilation helper
     expected<void> CompileModelToEpContext(std::string_view name, std::span<const std::byte> modelData,
                                            const std::map<std::string, std::span<const std::byte>>& weightsData,
-                                           const std::filesystem::path& modelCacheDir);
-    expected<InferenceSessionPtr> LoadSessionFromCache(std::string_view name, const std::filesystem::path& modelCacheDir);
+                                           const std::filesystem::path& modelPath);
+    bool SupportsEpContextCaching() const;
+    std::string FullCacheKey(std::string_view cacheKey) const;
 
     const WinMlEngineParams m_params;
     InferenceEngineInfo m_info;

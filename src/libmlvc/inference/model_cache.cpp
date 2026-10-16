@@ -3,16 +3,44 @@
 
 #include "libmlvc/inference/model_cache.hpp"
 #include "libmlvc/common/logging.hpp"
+#include "libmlvc/common/macros.hpp"
 
 #include <libmlvc/error_codes.hpp>
 
 #include <cstdint>
 #include <fstream>
 
+// clang-format off
+#if defined(MLVC_PLATFORM_WINCLASSIC)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#endif
+// clang-format on
+
 namespace libmlvc {
 
 static constexpr auto kAccessTimeFilename = "last_access.time";
 static constexpr auto kCleanupThrottleInterval = std::chrono::hours(1);
+
+// Converts a path to UTF-8 for logging without throwing: on Windows, path::string() throws for characters outside
+// the ANSI code page and path::u8string() for unpaired surrogates, which become U+FFFD here.
+static std::string ToLogString(const std::filesystem::path& path) noexcept
+{
+#if defined(MLVC_PLATFORM_WINCLASSIC)
+    const std::wstring& wide = path.native();
+    if (wide.empty()) return {};
+    const int wideLen = static_cast<int>(wide.size());
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "<unprintable path>";
+    std::string result(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen, result.data(), len, nullptr, nullptr);
+    return result;
+#else
+    return path.native();
+#endif
+}
 
 ModelCache& ModelCache::Instance()
 {
@@ -49,7 +77,14 @@ expected<std::filesystem::path> ModelCache::CreateCacheDir(std::string_view cach
 
     auto cacheDir = m_rootDir / std::string(cacheKey);
 
+    // Start from an empty directory, without files left by an earlier compile
     std::error_code ec;
+    std::filesystem::remove_all(cacheDir, ec);
+    if (ec) {
+        MLVC_LOG_ERROR("Failed to delete existing directory for cache key '%s': %s", std::string(cacheKey).c_str(),
+                       ec.message().c_str());
+        return make_error_code(Error::io_error);
+    }
     std::filesystem::create_directories(cacheDir, ec);
     if (ec) {
         MLVC_LOG_ERROR("Failed to create directory for cache key '%s': %s", std::string(cacheKey).c_str(),
@@ -137,14 +172,17 @@ expected<void> ModelCache::CleanupCacheDirs(std::chrono::seconds retentionTime, 
     MLVC_LOG_INFO("Starting cache cleanup with %lld second retention", static_cast<long long>(retentionTime.count()));
 
     int deletedCount = 0;
-    std::filesystem::directory_iterator dirIter(m_rootDir, ec);
-    if (ec) {
-        MLVC_LOG_ERROR("Failed to iterate over cache root directory: %s", ec.message().c_str());
+    std::error_code iterEc;
+    std::filesystem::directory_iterator dirIter(m_rootDir, iterEc);
+    if (iterEc) {
+        MLVC_LOG_ERROR("Failed to iterate over cache root directory: %s", iterEc.message().c_str());
         return make_error_code(Error::io_error);
     }
 
-    for (auto const& entry : dirIter) {
-        if (!entry.is_directory()) {
+    // Use error codes, not exceptions: an exception thrown in this noexcept function would terminate the process
+    for (; !iterEc && dirIter != std::filesystem::directory_iterator(); dirIter.increment(iterEc)) {
+        const auto& entry = *dirIter;
+        if (!entry.is_directory(ec)) {
             continue;
         }
 
@@ -154,7 +192,7 @@ expected<void> ModelCache::CleanupCacheDirs(std::chrono::seconds retentionTime, 
             std::filesystem::remove_all(entry.path(), ec);
             if (ec) {
                 MLVC_LOG_ERROR("Failed to delete cache directory with missing access time %s: %s",
-                               entry.path().string().c_str(), ec.message().c_str());
+                               ToLogString(entry.path().filename()).c_str(), ec.message().c_str());
             } else {
                 deletedCount++;
             }
@@ -165,14 +203,17 @@ expected<void> ModelCache::CleanupCacheDirs(std::chrono::seconds retentionTime, 
         if (age > retentionTime) {
             std::filesystem::remove_all(entry.path(), ec);
             if (ec) {
-                MLVC_LOG_ERROR("Failed to delete cache directory %s: %s", entry.path().filename().string().c_str(),
+                MLVC_LOG_ERROR("Failed to delete cache directory %s: %s", ToLogString(entry.path().filename()).c_str(),
                                ec.message().c_str());
             } else {
                 deletedCount++;
-                MLVC_LOG_DEBUG("Deleted expired cache: %s (age: %lld days)", entry.path().filename().string().c_str(),
+                MLVC_LOG_DEBUG("Deleted expired cache: %s (age: %lld days)", ToLogString(entry.path().filename()).c_str(),
                                static_cast<long long>(age.count() / (24 * 60 * 60)));
             }
         }
+    }
+    if (iterEc) {
+        MLVC_LOG_ERROR("Failed to iterate over cache root directory: %s", iterEc.message().c_str());
     }
 
     MLVC_LOG_INFO("Cache cleanup completed: deleted %d expired entries", deletedCount);

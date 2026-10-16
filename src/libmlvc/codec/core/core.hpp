@@ -83,6 +83,7 @@ protected:
     Tensor<int32_t, 3> m_yRaw1Int32{};
     Tensor<int32_t, 3> m_zRawInt32{};
 
+    expected<void> ValidateModelImageTensor(const Tensor<mlvc_f16_t, 3>& image) const;
     expected<int> MapQpToQIndex(const int qp) const;
     expected<int> GetQIndexShifted(const int qIndex, const int curFrameIdx) const;
 };
@@ -128,7 +129,7 @@ protected:
     GopManager m_gop;
     MlvcEncoderModel::Inputs m_inputs;
     MlvcEncoderModel::Outputs m_outputs;
-    InputTransformer m_inputTransformer{};
+    InputTransformer m_inputTransformer;
     rans::HeapResizableBuffer m_buffer{};
     rans::RansEncoderStream m_stream{};
     GaussianEncoder m_gaussianEncoder;
@@ -170,7 +171,7 @@ protected:
     rans::RansDecoderStream m_stream{};
     GaussianDecoder m_gaussianDecoder;
     BitEstimatorDecoder m_bitEstimatorZ;
-    OutputTransformer<mlvc_f16_t> m_outputTransformer{};
+    OutputTransformer<mlvc_f16_t> m_outputTransformer;
     Stats m_stats{};
 };
 

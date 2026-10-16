@@ -123,7 +123,8 @@ fast as possible.
 
 To benchmark another raw video clip, set `--input`, `--input-width`, and `--input-height`. Adjust the
 duration of each iteration with `--duration-seconds`, and increase `--num-encoders` or
-`--num-decoders` to evaluate more concurrent streams.
+`--num-decoders` to evaluate more concurrent streams. Pass `--profile` to also report the time, CPU time,
+and memory of each start-up and run phase.
 
 ## C++ library usage
 

@@ -33,9 +33,10 @@ public:
     std::filesystem::path modelBundlesDir = GetDefaultModelBundlesDir();
     MlvcVersion mlvcVersion = GetDefaultModelVersion();
     ComputeUnit computeUnit = ComputeUnit::NPU;
+    std::filesystem::path cacheDir;
     LogLevel logLevel = LogLevel::Error;
     bool enableModelCache = true;
-    bool enableSessionCaching = true;
+    bool enableSessionPreloading = true;
     WinMlInitMode winmlInitMode = WinMlInitMode::AppSdk;
 
 protected:
@@ -72,14 +73,18 @@ public:
     int inputWidth = 960;
     int inputHeight = 540;
     std::filesystem::path outputDirectory = "./";
+    bool saveStats = false;
     int numEncoders = 0;
     int numDecoders = 0;
     double targetFps = 1000.0;
     int durationSeconds = 20;
     int numIterations = 1;
-    bool strictFpsTarget = true;
     int waitSeconds = 0;
+    int inferenceEngineWaitSeconds = 0;
     int qp = 26;
+    bool profile = false;
+    int profileIntervalMs = 1000;
+    bool profileVerbose = false;
 
     void Save(const std::filesystem::path& filename) const;
 

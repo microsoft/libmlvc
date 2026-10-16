@@ -12,8 +12,10 @@
 namespace libmlvc {
 
 Nv12FrameView TransposeNv12(const Nv12FrameView& frame, std::vector<std::byte>& buffer);
-void Nv12ToYuv444Fp16(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output);
-Nv12FrameView Yuv444Fp16ToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer);
+void Nv12ToYuv444Fp16Nchw(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output);
+void Nv12ToYuv444Fp16Nhwc(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output);
+Nv12FrameView Yuv444Fp16NchwToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer);
+Nv12FrameView Yuv444Fp16NhwcToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer);
 void Float16ToInt32(const Tensor<uint16_t, 3>& input, Tensor<int32_t, 3>& output);
 void Int32ToFloat16(const Tensor<int32_t, 3>& input, Tensor<uint16_t, 3>& output);
 

@@ -81,7 +81,7 @@ public:
     expected<FrameInfo> GetNextFrameInfo(const EncodeParams& params = {}) const;
 
     /// Encodes one NV12 frame.
-    /// @param frame Frame whose dimensions match the configuration, stride is at least its width, and
+    /// @param frame Frame whose dimensions match the configuration, stride is even and at least its width, and
     /// planes contain `stride * height` Y bytes and `stride * height / 2` UV bytes. Storage must remain
     /// valid until this call returns.
     /// @param params Per-frame quantization, IDR, and LTR recovery controls.
@@ -153,7 +153,7 @@ public:
 
     /// Creates a manager from in-memory model bundles.
     /// @param params Compute, cache, and Windows ML initialization settings.
-    /// @param bundleBlobs Model bundles to copy. Their storage must remain valid and unchanged until this call returns.
+    /// @param bundleBlobs Model bundles to load. Their storage must remain valid and unchanged until this call returns.
     /// @param cancelToken Token checked for cancellation between initialization steps.
     /// @param progressCallback Optional initialization progress callback.
     /// @return An initialized manager, or an initialization error.

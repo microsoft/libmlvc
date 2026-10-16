@@ -70,7 +70,7 @@ public:
 class BaseBenchmarkRunner : public IBenchmarkRunner {
 public:
     BaseBenchmarkRunner(std::string_view name, const BenchmarkArguments& args, const MlvcManager& manager, size_t numFrames,
-                        StatsDump& dump, BenchmarkResults& benchmarkResults, std::atomic<bool>& stopFlag);
+                        StatsDump* dump, BenchmarkResults& benchmarkResults, std::atomic<bool>& stopFlag);
     ~BaseBenchmarkRunner();
 
     expected<void> Initialize() override;
@@ -82,7 +82,7 @@ protected:
     const BenchmarkArguments& m_args;
     const MlvcManager& m_manager;
     const size_t m_numFrames;
-    StatsDump& m_dump;
+    StatsDump* const m_dump;
     BenchmarkResults& m_benchmarkResults;
     std::atomic<bool>& m_stopFlag;
     std::thread m_thread;
@@ -96,7 +96,7 @@ protected:
 class EncoderBenchmarkRunner : public BaseBenchmarkRunner {
 public:
     EncoderBenchmarkRunner(std::string_view name, const BenchmarkArguments& args, const MlvcManager& manager,
-                           const std::vector<Nv12Frame>& frames, StatsDump& dump, BenchmarkResults& benchmarkResults,
+                           const std::vector<Nv12Frame>& frames, StatsDump* dump, BenchmarkResults& benchmarkResults,
                            std::atomic<bool>& stopFlag);
 
     expected<void> Initialize() override;
@@ -114,8 +114,10 @@ private:
 class DecoderBenchmarkRunner : public BaseBenchmarkRunner {
 public:
     DecoderBenchmarkRunner(std::string_view name, const BenchmarkArguments& args, const MlvcManager& manager,
-                           const std::vector<MlvcAccessUnit>& accessUnits, StatsDump& dump,
+                           const std::vector<MlvcAccessUnit>& accessUnits, StatsDump* dump,
                            BenchmarkResults& benchmarkResults, std::atomic<bool>& stopFlag);
+
+    expected<void> Initialize() override;
 
 private:
     const std::vector<MlvcAccessUnit>& m_accessUnits;

@@ -5,6 +5,7 @@
 #include "libmlvc/common/logging.hpp"
 
 #include <algorithm>
+#include <array>
 
 namespace libmlvc {
 
@@ -947,6 +948,93 @@ void ConvertNv12ToYuv444Fp16Impl(const uint8_t* yPlane, const uint8_t* uvPlane, 
     }
 }
 
+MLVC_FORCE_INLINE __m128i LoadNv12Fp16x8(const uint8_t* source, __m256 scale)
+{
+    return _mm256_cvtps_ph(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(Load64(source))), scale),
+                           _MM_FROUND_TO_NEAREST_INT);
+}
+
+MLVC_FORCE_INLINE __m256i LoadNv12Fp16x16(const uint8_t* source, __m256 scale)
+{
+    return _mm256_set_m128i(LoadNv12Fp16x8(source + 8, scale), LoadNv12Fp16x8(source, scale));
+}
+
+MLVC_FORCE_INLINE void ConvertNv12BlockToYuv444Nhwc(const uint8_t* lumaFirst, const uint8_t* lumaSecond,
+                                                    const uint8_t* chromaRow, uint16_t* outputFirst, uint16_t* outputSecond)
+{
+    const __m256 scale = _mm256_set1_ps(1.0f / 255.0f);
+    const __m256i lumaFirstIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 1, -1, -1, -1, -1, 2, 3, -1, -1, -1, -1, 4, 5, -1, -1));
+    const __m256i lumaMiddleIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, 6, 7, -1, -1, -1, -1, 8, 9, -1, -1, -1, -1, 10, 11));
+    const __m256i lumaLastIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, 12, 13, -1, -1, -1, -1, 14, 15, -1, -1, -1, -1));
+    const __m256i chromaFirstIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, 0, 1, 2, 3, -1, -1, 0, 1, 2, 3, -1, -1, 4, 5));
+    const __m256i chromaMiddleIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(6, 7, -1, -1, 4, 5, 6, 7, -1, -1, 8, 9, 10, 11, -1, -1));
+    const __m256i chromaLastIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(8, 9, 10, 11, -1, -1, 12, 13, 14, 15, -1, -1, 12, 13, 14, 15));
+
+    const auto store16 = [&](uint16_t* destination, __m256i lumaValues, __m256i chromaFirst, __m256i chromaMiddle,
+                             __m256i chromaLast) {
+        __m256i first = _mm256_or_si256(_mm256_shuffle_epi8(lumaValues, lumaFirstIndices), chromaFirst);
+        __m256i middle = _mm256_or_si256(_mm256_shuffle_epi8(lumaValues, lumaMiddleIndices), chromaMiddle);
+        __m256i last = _mm256_or_si256(_mm256_shuffle_epi8(lumaValues, lumaLastIndices), chromaLast);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination), _mm256_permute2x128_si256(first, middle, 0x20));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination + 16), _mm256_permute2x128_si256(last, first, 0x30));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination + 32), _mm256_permute2x128_si256(middle, last, 0x31));
+    };
+
+    __m256i chromaValues = LoadNv12Fp16x16(chromaRow, scale);
+    __m256i chromaFirst = _mm256_shuffle_epi8(chromaValues, chromaFirstIndices);
+    __m256i chromaMiddle = _mm256_shuffle_epi8(chromaValues, chromaMiddleIndices);
+    __m256i chromaLast = _mm256_shuffle_epi8(chromaValues, chromaLastIndices);
+    store16(outputFirst, LoadNv12Fp16x16(lumaFirst, scale), chromaFirst, chromaMiddle, chromaLast);
+    store16(outputSecond, LoadNv12Fp16x16(lumaSecond, scale), chromaFirst, chromaMiddle, chromaLast);
+}
+
+void ConvertNv12ToYuv444Fp16NhwcImpl(const uint8_t* yPlane, const uint8_t* uvPlane, std::size_t nv12Stride,
+                                     uint16_t* yuv444Out, std::size_t yuv444Stride, int width, int height)
+{
+    MLVC_ASSERT(width % 2 == 0 && height % 2 == 0);
+
+    const auto normalizeScalar = [](uint8_t value) -> uint16_t {
+        return Fp32To16(static_cast<float>(value) * (1.0f / 255.0f));
+    };
+
+    for (int row = 0; row < height; row += 2) {
+        const uint8_t* lumaFirst = yPlane + row * nv12Stride;
+        const uint8_t* lumaSecond = lumaFirst + nv12Stride;
+        const uint8_t* chromaRow = uvPlane + (row / 2) * nv12Stride;
+        uint16_t* outputFirst = ByteOffset(yuv444Out, static_cast<std::size_t>(row) * yuv444Stride);
+        uint16_t* outputSecond = ByteOffset(outputFirst, yuv444Stride);
+        int column = 0;
+        for (; column + 16 <= width; column += 16) {
+            ConvertNv12BlockToYuv444Nhwc(lumaFirst + column, lumaSecond + column, chromaRow + column,
+                                         outputFirst + column * 3, outputSecond + column * 3);
+        }
+        if (column < width && width >= 16) {
+            const int start = width - 16;
+            ConvertNv12BlockToYuv444Nhwc(lumaFirst + start, lumaSecond + start, chromaRow + start,
+                                         outputFirst + start * 3, outputSecond + start * 3);
+            column = width;
+        }
+        for (; column < width; column += 2) {
+            uint16_t normalizedU = normalizeScalar(chromaRow[column]);
+            uint16_t normalizedV = normalizeScalar(chromaRow[column + 1]);
+            outputFirst[0] = normalizeScalar(lumaFirst[column]);
+            outputFirst[3] = normalizeScalar(lumaFirst[column + 1]);
+            outputSecond[0] = normalizeScalar(lumaSecond[column]);
+            outputSecond[3] = normalizeScalar(lumaSecond[column + 1]);
+            outputFirst[1] = outputFirst[4] = outputSecond[1] = outputSecond[4] = normalizedU;
+            outputFirst[2] = outputFirst[5] = outputSecond[2] = outputSecond[5] = normalizedV;
+            outputFirst += 6;
+            outputSecond += 6;
+        }
+    }
+}
+
 }  // anonymous namespace
 #endif  // MLVC_ARCH_X86_64
 
@@ -1048,10 +1136,89 @@ void ConvertNv12ToYuv444Fp16Impl(const uint8_t* yPlane, const uint8_t* uvPlane, 
         }
     }
 }
+
+void ConvertNv12ToYuv444Fp16NhwcImpl(const uint8_t* yPlane, const uint8_t* uvPlane, std::size_t nv12Stride,
+                                     uint16_t* yuv444Out, std::size_t yuv444Stride, int width, int height)
+{
+    MLVC_ASSERT(width % 2 == 0 && height % 2 == 0);
+
+    constexpr std::array<uint8_t, 16> firstOffsets{ 0, 1, 16, 17, 18, 19, 2, 3, 16, 17, 18, 19, 4, 5, 20, 21 };
+    constexpr std::array<uint8_t, 16> middleOffsets{ 22, 23, 6, 7, 20, 21, 22, 23, 8, 9, 24, 25, 26, 27, 10, 11 };
+    constexpr std::array<uint8_t, 16> lastOffsets{ 24, 25, 26, 27, 12, 13, 28, 29, 30, 31, 14, 15, 28, 29, 30, 31 };
+    const auto firstIndices = vld1q_u8(firstOffsets.data());
+    const auto middleIndices = vld1q_u8(middleOffsets.data());
+    const auto lastIndices = vld1q_u8(lastOffsets.data());
+    const auto scale = vreinterpretq_f16_u16(vdupq_n_u16(0x1c04));
+    const auto biasBits = vdupq_n_u16(1);
+
+    const int w16 = width & ~15;
+
+    const auto normalize = [&](const uint16x8_t values) {
+        const auto nonzeroBias = vreinterpretq_f16_u16(vminq_u16(values, biasBits));
+        return vreinterpretq_u16_f16(vfmaq_f16(nonzeroBias, vcvtq_f16_u16(values), scale));
+    };
+    const auto store = [&](uint16_t* destination, const uint16x8_t lumaValues, const uint16x8_t chromaValues) {
+        const uint8x16x2_t channels{ { vreinterpretq_u8_u16(lumaValues), vreinterpretq_u8_u16(chromaValues) } };
+        auto* bytes = reinterpret_cast<uint8_t*>(destination);
+        vst1q_u8(bytes, vqtbl2q_u8(channels, firstIndices));
+        vst1q_u8(bytes + 16, vqtbl2q_u8(channels, middleIndices));
+        vst1q_u8(bytes + 32, vqtbl2q_u8(channels, lastIndices));
+    };
+    const auto normalizeScalar = [&](const uint8_t value) { return vgetq_lane_u16(normalize(vdupq_n_u16(value)), 0); };
+    auto rowPtr = [](uint16_t* base, int rowIndex, std::size_t stride) -> uint16_t* {
+        return reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(base) + static_cast<std::size_t>(rowIndex) * stride);
+    };
+
+    for (int row = 0; row < height; row += 2) {
+        const uint8_t* lumaFirst = yPlane + row * nv12Stride;
+        const uint8_t* lumaSecond = lumaFirst + nv12Stride;
+        const uint8_t* chromaRow = uvPlane + (row / 2) * nv12Stride;
+        uint16_t* outputFirst = rowPtr(yuv444Out, row, yuv444Stride);
+        uint16_t* outputSecond = rowPtr(yuv444Out, row + 1, yuv444Stride);
+        int column = 0;
+        for (; column < w16; column += 16) {
+            const auto uv = vld1q_u8(chromaRow + column);
+            const auto first = vld1q_u8(lumaFirst + column);
+            const auto second = vld1q_u8(lumaSecond + column);
+            const auto chromaLow = normalize(vmovl_u8(vget_low_u8(uv)));
+            const auto firstLow = normalize(vmovl_u8(vget_low_u8(first)));
+            const auto secondLow = normalize(vmovl_u8(vget_low_u8(second)));
+            const auto chromaHigh = normalize(vmovl_high_u8(uv));
+            const auto firstHigh = normalize(vmovl_high_u8(first));
+            const auto secondHigh = normalize(vmovl_high_u8(second));
+            store(outputFirst, firstLow, chromaLow);
+            store(outputSecond, secondLow, chromaLow);
+            store(outputFirst + 24, firstHigh, chromaHigh);
+            store(outputSecond + 24, secondHigh, chromaHigh);
+            outputFirst += 48;
+            outputSecond += 48;
+        }
+        if (column + 8 <= width) {
+            const auto chromaValues = normalize(vmovl_u8(vld1_u8(chromaRow + column)));
+            store(outputFirst, normalize(vmovl_u8(vld1_u8(lumaFirst + column))), chromaValues);
+            store(outputSecond, normalize(vmovl_u8(vld1_u8(lumaSecond + column))), chromaValues);
+            column += 8;
+            outputFirst += 24;
+            outputSecond += 24;
+        }
+        for (; column < width; column += 2) {
+            const auto normalizedU = normalizeScalar(chromaRow[column]);
+            const auto normalizedV = normalizeScalar(chromaRow[column + 1]);
+            outputFirst[0] = normalizeScalar(lumaFirst[column]);
+            outputFirst[3] = normalizeScalar(lumaFirst[column + 1]);
+            outputSecond[0] = normalizeScalar(lumaSecond[column]);
+            outputSecond[3] = normalizeScalar(lumaSecond[column + 1]);
+            outputFirst[1] = outputFirst[4] = outputSecond[1] = outputSecond[4] = normalizedU;
+            outputFirst[2] = outputFirst[5] = outputSecond[2] = outputSecond[5] = normalizedV;
+            outputFirst += 6;
+            outputSecond += 6;
+        }
+    }
+}
 }  // anonymous namespace
 #endif  // MLVC_ARCH_ARM64
 
-void Nv12ToYuv444Fp16(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output)
+void Nv12ToYuv444Fp16Nchw(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output)
 {
     const int width = frame.Width();
     const int height = frame.Height();
@@ -1075,6 +1242,23 @@ void Nv12ToYuv444Fp16(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output)
 
     ConvertNv12ToYuv444Fp16Impl(yPlane, uvPlane, static_cast<std::size_t>(stride), yOut, uOut, vOut, yuv444Stride,
                                 width, height);
+}
+
+void Nv12ToYuv444Fp16Nhwc(const Nv12FrameView& frame, Tensor<uint16_t, 3>& output)
+{
+    const int width = frame.Width();
+    const int height = frame.Height();
+    const int stride = frame.Stride();
+    MLVC_ASSERT(output.Shape()[0] >= height && output.Shape()[1] >= width && output.Shape()[2] == 3);
+    MLVC_ASSERT(output.Strides()[1] == 3 && output.Strides()[2] == 1);
+    MLVC_ASSERT(width % 2 == 0 && height % 2 == 0);
+
+    const uint8_t* yPlane = reinterpret_cast<const uint8_t*>(frame.YPlane().data());
+    const uint8_t* uvPlane = reinterpret_cast<const uint8_t*>(frame.UvPlane().data());
+    const std::size_t yuv444Stride = static_cast<std::size_t>(output.Strides()[0]) * sizeof(uint16_t);
+
+    ConvertNv12ToYuv444Fp16NhwcImpl(yPlane, uvPlane, static_cast<std::size_t>(stride), output.Data().data(),
+                                    yuv444Stride, width, height);
 }
 
 // ============================================================================
@@ -1101,33 +1285,56 @@ MLVC_FORCE_INLINE __m256 LdFp16(const uint16_t* p)
     return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)));
 }
 
-MLVC_FORCE_INLINE __m256i FmaRound(__m256 val, __m256 scale, __m256 biasF, __m256i biasI)
+MLVC_FORCE_INLINE __m256i QuantizeLuma8(__m128i values)
 {
-    return _mm256_sub_epi32(_mm256_castps_si256(_mm256_fmadd_ps(val, scale, biasF)), biasI);
+    const __m256 scale = _mm256_set1_ps(255.0f);
+    const __m256 half = _mm256_set1_ps(0.5f);
+    __m256 scaled = _mm256_mul_ps(_mm256_cvtph_ps(values), scale);
+    return _mm256_cvttps_epi32(_mm256_add_ps(scaled, half));
+}
+
+MLVC_FORCE_INLINE __m256i LoadLuma8(const uint16_t* source)
+{
+    return QuantizeLuma8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(source)));
+}
+
+MLVC_FORCE_INLINE __m256i RoundToU8(__m256 values)
+{
+    const __m256 half = _mm256_set1_ps(0.5f);
+    __m256i truncated = _mm256_cvttps_epi32(values);
+    __m256 threshold = _mm256_add_ps(_mm256_cvtepi32_ps(truncated), half);
+    __m256i increment = _mm256_castps_si256(_mm256_cmp_ps(values, threshold, _CMP_GE_OQ));
+    return _mm256_sub_epi32(truncated, increment);
 }
 
 MLVC_FORCE_INLINE __m256i ReduceUv16(const uint16_t* su0, const uint16_t* su1, const uint16_t* sv0, const uint16_t* sv1,
-                                     int x, __m256 scale, __m256 biasF, __m256i biasI)
+                                     int column, __m256 scale)
 {
-    __m256 us = _mm256_add_ps(LdFp16(su0 + x), LdFp16(su1 + x));
-    __m256 vs = _mm256_add_ps(LdFp16(sv0 + x), LdFp16(sv1 + x));
-    __m256 ubs = _mm256_add_ps(LdFp16(su0 + x + 8), LdFp16(su1 + x + 8));
-    __m256 vbs = _mm256_add_ps(LdFp16(sv0 + x + 8), LdFp16(sv1 + x + 8));
-    __m256 a = _mm256_add_ps(_mm256_shuffle_ps(us, vs, 0x88), _mm256_shuffle_ps(us, vs, 0xDD));
-    __m256 b = _mm256_add_ps(_mm256_shuffle_ps(ubs, vbs, 0x88), _mm256_shuffle_ps(ubs, vbs, 0xDD));
-    return _mm256_packs_epi32(FmaRound(a, scale, biasF, biasI), FmaRound(b, scale, biasF, biasI));
+    __m256 firstU = LdFp16(su0 + column);
+    __m256 firstV = LdFp16(sv0 + column);
+    __m256 secondU = LdFp16(su1 + column);
+    __m256 secondV = LdFp16(sv1 + column);
+    __m256 low = _mm256_add_ps(_mm256_shuffle_ps(firstU, firstV, 0x88), _mm256_shuffle_ps(firstU, firstV, 0xDD));
+    low = _mm256_add_ps(low, _mm256_shuffle_ps(secondU, secondV, 0x88));
+    low = _mm256_add_ps(low, _mm256_shuffle_ps(secondU, secondV, 0xDD));
+
+    firstU = LdFp16(su0 + column + 8);
+    firstV = LdFp16(sv0 + column + 8);
+    secondU = LdFp16(su1 + column + 8);
+    secondV = LdFp16(sv1 + column + 8);
+    __m256 high = _mm256_add_ps(_mm256_shuffle_ps(firstU, firstV, 0x88), _mm256_shuffle_ps(firstU, firstV, 0xDD));
+    high = _mm256_add_ps(high, _mm256_shuffle_ps(secondU, secondV, 0x88));
+    high = _mm256_add_ps(high, _mm256_shuffle_ps(secondU, secondV, 0xDD));
+    return _mm256_packs_epi32(RoundToU8(_mm256_mul_ps(low, scale)), RoundToU8(_mm256_mul_ps(high, scale)));
 }
 
-void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const uint16_t* vIn, std::size_t yuv444Stride,
-                                 uint8_t* nv12Out, std::size_t nv12Stride, int width, int height)
+void ConvertYuv444Fp16NchwToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const uint16_t* vIn, std::size_t yuv444Stride,
+                                     uint8_t* nv12Out, std::size_t nv12Stride, int width, int height)
 {
     uint8_t* nv12Y = nv12Out;
     uint8_t* nv12Uv = nv12Out + nv12Stride * static_cast<std::size_t>(height);
 
-    const __m256 s255 = _mm256_set1_ps(255.0f);
     const __m256 sAvg = _mm256_set1_ps(255.0f / 4.0f);
-    const __m256 biasF = _mm256_set1_ps(8388608.0f);      // 2^23
-    const __m256i biasI = _mm256_set1_epi32(0x4B000000);  // same as float
     const __m256i perm = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
     const __m256i uvSwap = _mm256_setr_epi8(0, 2, 1, 3, 4, 6, 5, 7, 8, 10, 9, 11, 12, 14, 13, 15, 0, 2, 1, 3, 4, 6, 5,
                                             7, 8, 10, 9, 11, 12, 14, 13, 15);
@@ -1148,22 +1355,18 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
         int x = 0;
         for (; x < w32; x += 32) {
             // Y: 32 fp16 -> 32 uint8 per row
-            __m256i y0a = _mm256_packs_epi32(FmaRound(LdFp16(sy0 + x), s255, biasF, biasI),
-                                             FmaRound(LdFp16(sy0 + x + 8), s255, biasF, biasI));
-            __m256i y0b = _mm256_packs_epi32(FmaRound(LdFp16(sy0 + x + 16), s255, biasF, biasI),
-                                             FmaRound(LdFp16(sy0 + x + 24), s255, biasF, biasI));
-            __m256i y1a = _mm256_packs_epi32(FmaRound(LdFp16(sy1 + x), s255, biasF, biasI),
-                                             FmaRound(LdFp16(sy1 + x + 8), s255, biasF, biasI));
-            __m256i y1b = _mm256_packs_epi32(FmaRound(LdFp16(sy1 + x + 16), s255, biasF, biasI),
-                                             FmaRound(LdFp16(sy1 + x + 24), s255, biasF, biasI));
+            __m256i y0a = _mm256_packs_epi32(LoadLuma8(sy0 + x), LoadLuma8(sy0 + x + 8));
+            __m256i y0b = _mm256_packs_epi32(LoadLuma8(sy0 + x + 16), LoadLuma8(sy0 + x + 24));
+            __m256i y1a = _mm256_packs_epi32(LoadLuma8(sy1 + x), LoadLuma8(sy1 + x + 8));
+            __m256i y1b = _mm256_packs_epi32(LoadLuma8(sy1 + x + 16), LoadLuma8(sy1 + x + 24));
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(dy0 + x),
                                 _mm256_permutevar8x32_epi32(_mm256_packus_epi16(y0a, y0b), perm));
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(dy1 + x),
                                 _mm256_permutevar8x32_epi32(_mm256_packus_epi16(y1a, y1b), perm));
 
             // UV: 2x2 box average -> interleaved UVUV uint8
-            __m256i uv1 = ReduceUv16(su0, su1, sv0, sv1, x, sAvg, biasF, biasI);
-            __m256i uv2 = ReduceUv16(su0, su1, sv0, sv1, x + 16, sAvg, biasF, biasI);
+            __m256i uv1 = ReduceUv16(su0, su1, sv0, sv1, x, sAvg);
+            __m256i uv2 = ReduceUv16(su0, su1, sv0, sv1, x + 16, sAvg);
             __m256i uv = _mm256_permutevar8x32_epi32(_mm256_packus_epi16(uv1, uv2), perm);
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(duv + x), _mm256_shuffle_epi8(uv, uvSwap));
         }
@@ -1180,8 +1383,133 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
             float v10 = Fp16To32(sv1[x]), v11 = Fp16To32(sv1[x + 1]);
             int uAvg = static_cast<int>(std::roundf((u00 + u01 + u10 + u11) * 63.75f));
             int vAvg = static_cast<int>(std::roundf((v00 + v01 + v10 + v11) * 63.75f));
-            duv[x] = static_cast<uint8_t>(uAvg < 0 ? 0 : uAvg > 255 ? 255 : uAvg);
-            duv[x + 1] = static_cast<uint8_t>(vAvg < 0 ? 0 : vAvg > 255 ? 255 : vAvg);
+            duv[x] = static_cast<uint8_t>(std::clamp(uAvg, 0, 255));
+            duv[x + 1] = static_cast<uint8_t>(std::clamp(vAvg, 0, 255));
+        }
+    }
+}
+
+struct Yuv444NhwcFp16Block {
+    __m256i luma{};
+    __m256i chromaEven{};
+    __m256i chromaOdd{};
+};
+
+MLVC_FORCE_INLINE Yuv444NhwcFp16Block LoadYuv444NhwcFp16(const uint16_t* source)
+{
+    const __m256i lumaFirstIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 1, 6, 7, 12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m256i lumaMiddleIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, -1, -1, 2, 3, 8, 9, 14, 15, -1, -1, -1, -1));
+    const __m256i lumaLastIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 4, 5, 10, 11));
+    const __m256i chromaEvenFirstIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(2, 3, 4, 5, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m256i chromaEvenMiddleIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, -1, -1, 0, 1, 10, 11, 12, 13, -1, -1, -1, -1));
+    const __m256i chromaEvenLastIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 6, 7, 8, 9));
+    const __m256i chromaOddFirstIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(8, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m256i chromaOddMiddleIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, 4, 5, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m256i chromaOddLastIndices =
+        _mm256_broadcastsi128_si256(_mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 12, 13, 14, 15));
+
+    __m256i low = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(source));
+    __m256i center = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(source + 16));
+    __m256i high = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(source + 32));
+    __m256i first = _mm256_permute2x128_si256(low, center, 0x30);
+    __m256i middle = _mm256_permute2x128_si256(low, high, 0x21);
+    __m256i last = _mm256_permute2x128_si256(center, high, 0x30);
+    return Yuv444NhwcFp16Block{ _mm256_or_si256(_mm256_or_si256(_mm256_shuffle_epi8(first, lumaFirstIndices),
+                                                                _mm256_shuffle_epi8(middle, lumaMiddleIndices)),
+                                                _mm256_shuffle_epi8(last, lumaLastIndices)),
+                                _mm256_or_si256(_mm256_or_si256(_mm256_shuffle_epi8(first, chromaEvenFirstIndices),
+                                                                _mm256_shuffle_epi8(middle, chromaEvenMiddleIndices)),
+                                                _mm256_shuffle_epi8(last, chromaEvenLastIndices)),
+                                _mm256_or_si256(_mm256_or_si256(_mm256_shuffle_epi8(first, chromaOddFirstIndices),
+                                                                _mm256_shuffle_epi8(middle, chromaOddMiddleIndices)),
+                                                _mm256_shuffle_epi8(last, chromaOddLastIndices)) };
+}
+
+MLVC_FORCE_INLINE __m128i PackNhwcU8x16(__m256i low, __m256i high)
+{
+    __m256i words = _mm256_packs_epi32(low, high);
+    return _mm_packus_epi16(_mm256_castsi256_si128(words), _mm256_extracti128_si256(words, 1));
+}
+
+MLVC_FORCE_INLINE __m256i ReduceNhwcUv8(__m128i firstEven, __m128i firstOdd, __m128i secondEven, __m128i secondOdd)
+{
+    const __m256 scale = _mm256_set1_ps(63.75f);
+    __m256 sums = _mm256_add_ps(_mm256_cvtph_ps(firstEven), _mm256_cvtph_ps(firstOdd));
+    sums = _mm256_add_ps(sums, _mm256_cvtph_ps(secondEven));
+    sums = _mm256_add_ps(sums, _mm256_cvtph_ps(secondOdd));
+    return RoundToU8(_mm256_mul_ps(sums, scale));
+}
+
+MLVC_FORCE_INLINE void StoreNhwcLuma(uint8_t* destination, __m256i values)
+{
+    __m256i low = QuantizeLuma8(_mm256_castsi256_si128(values));
+    __m256i high = QuantizeLuma8(_mm256_extracti128_si256(values, 1));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(destination), _mm_shuffle_epi32(PackNhwcU8x16(low, high), 0xD8));
+}
+
+MLVC_FORCE_INLINE void ConvertYuv444NhwcBlockToNv12(const uint16_t* first, const uint16_t* second, uint8_t* firstLuma,
+                                                    uint8_t* secondLuma, uint8_t* chroma)
+{
+    Yuv444NhwcFp16Block firstChannels = LoadYuv444NhwcFp16(first);
+    StoreNhwcLuma(firstLuma, firstChannels.luma);
+    Yuv444NhwcFp16Block secondChannels = LoadYuv444NhwcFp16(second);
+    StoreNhwcLuma(secondLuma, secondChannels.luma);
+    __m256i low =
+        ReduceNhwcUv8(_mm256_castsi256_si128(firstChannels.chromaEven), _mm256_castsi256_si128(firstChannels.chromaOdd),
+                      _mm256_castsi256_si128(secondChannels.chromaEven), _mm256_castsi256_si128(secondChannels.chromaOdd));
+    __m256i high = ReduceNhwcUv8(
+        _mm256_extracti128_si256(firstChannels.chromaEven, 1), _mm256_extracti128_si256(firstChannels.chromaOdd, 1),
+        _mm256_extracti128_si256(secondChannels.chromaEven, 1), _mm256_extracti128_si256(secondChannels.chromaOdd, 1));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(chroma), _mm_shuffle_epi32(PackNhwcU8x16(low, high), 0xD8));
+}
+
+void ConvertYuv444Fp16NhwcToNv12Impl(const uint16_t* yuv444In, std::size_t yuv444Stride, uint8_t* nv12Out,
+                                     std::size_t nv12Stride, int width, int height)
+{
+    uint8_t* nv12Y = nv12Out;
+    uint8_t* nv12Uv = nv12Out + nv12Stride * static_cast<std::size_t>(height);
+
+    const auto toByte = [](float value) -> uint8_t {
+        return static_cast<uint8_t>(std::clamp(std::roundf(value), 0.0f, 255.0f));
+    };
+    for (int row = 0; row < height; row += 2) {
+        const uint16_t* first = RowPtr(yuv444In, row, yuv444Stride);
+        const uint16_t* second = RowPtr(yuv444In, row + 1, yuv444Stride);
+        uint8_t* lumaFirst = nv12Y + static_cast<std::size_t>(row) * nv12Stride;
+        uint8_t* lumaSecond = lumaFirst + nv12Stride;
+        uint8_t* chromaRow = nv12Uv + static_cast<std::size_t>(row / 2) * nv12Stride;
+
+        int column = 0;
+        for (; column + 16 <= width; column += 16) {
+            ConvertYuv444NhwcBlockToNv12(first + column * 3, second + column * 3, lumaFirst + column,
+                                         lumaSecond + column, chromaRow + column);
+        }
+        if (column < width && width >= 16) {
+            const int start = width - 16;
+            ConvertYuv444NhwcBlockToNv12(first + start * 3, second + start * 3, lumaFirst + start, lumaSecond + start,
+                                         chromaRow + start);
+            column = width;
+        }
+        for (; column < width; column += 2) {
+            lumaFirst[column] = Fp16ToU8(first[column * 3]);
+            lumaFirst[column + 1] = Fp16ToU8(first[(column + 1) * 3]);
+            lumaSecond[column] = Fp16ToU8(second[column * 3]);
+            lumaSecond[column + 1] = Fp16ToU8(second[(column + 1) * 3]);
+            for (int channel = 1; channel < 3; ++channel) {
+                const float topLeft = Fp16To32(first[column * 3 + channel]);
+                const float topRight = Fp16To32(first[(column + 1) * 3 + channel]);
+                const float bottomLeft = Fp16To32(second[column * 3 + channel]);
+                const float bottomRight = Fp16To32(second[(column + 1) * 3 + channel]);
+                chromaRow[column + channel - 1] = toByte((topLeft + topRight + bottomLeft + bottomRight) * 63.75f);
+            }
         }
     }
 }
@@ -1191,8 +1519,28 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
 
 #if defined(MLVC_ARCH_ARM64)
 namespace {
-void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const uint16_t* vIn, std::size_t yuv444Stride,
-                                 uint8_t* nv12Out, std::size_t nv12Stride, int width, int height)
+MLVC_FORCE_INLINE int32x4_t ReduceUv8(uint16x8_t first, uint16x8_t second)
+{
+    const float16x8_t ones = vreinterpretq_f16_u16(vdupq_n_u16(0x3c00));
+    const float16x8_t even = vreinterpretq_f16_u16(vuzp1q_u16(first, second));
+    const float16x8_t odd = vreinterpretq_f16_u16(vuzp2q_u16(first, second));
+
+    // Preserve ((topLeft + topRight) + bottomLeft) + bottomRight in FP32; regrouping changes rounding.
+    float32x4_t sums = vcvt_f32_f16(vget_low_f16(even));
+    sums = vfmlalq_low_f16(sums, odd, ones);
+    sums = vfmlalq_high_f16(sums, even, ones);
+    sums = vfmlalq_high_f16(sums, odd, ones);
+    return vcvtaq_s32_f32(vmulq_n_f32(sums, 63.75f));
+}
+
+MLVC_FORCE_INLINE uint8_t Fp16ChromaToU8(uint16_t topLeft, uint16_t topRight, uint16_t bottomLeft, uint16_t bottomRight)
+{
+    const float sum = Fp16To32(topLeft) + Fp16To32(topRight) + Fp16To32(bottomLeft) + Fp16To32(bottomRight);
+    return static_cast<uint8_t>(std::clamp(std::roundf(sum * 63.75f), 0.0f, 255.0f));
+}
+
+void ConvertYuv444Fp16NchwToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const uint16_t* vIn, std::size_t yuv444Stride,
+                                     uint8_t* nv12Out, std::size_t nv12Stride, int width, int height)
 {
     uint8_t* nv12Y = nv12Out;
     uint8_t* nv12Uv = nv12Out + nv12Stride * static_cast<std::size_t>(height);
@@ -1201,10 +1549,6 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
     const float16x8_t s255 = vreinterpretq_f16_u16(vdupq_n_u16(0x5BF8));
     // FP32 constant: 255.0 (for scalar tail Y path)
     const float32x4_t s255_f32 = vdupq_n_f32(255.0f);
-    // FP32 constant: 63.75 = 255/4 (combines averaging and scaling)
-    const float32x4_t s63_75 = vdupq_n_f32(63.75f);
-    // FP16 constant: 1.0 = 0x3C00 (FMLAL multiplier for vertical add)
-    const float16x8_t ones = vreinterpretq_f16_u16(vdupq_n_u16(0x3C00));
     // FP32 zero accumulator for FMLAL Y path
     const float32x4_t zero = vdupq_n_f32(0.0f);
 
@@ -1254,45 +1598,14 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
                 vst1q_u8(dy1 + x, vcombine_u8(vqmovun_s16(i01), vqmovun_s16(i23)));
             }
 
-            // UV: FMLAL vertical add (FP32, bit-exact)
-            // Row 0: FCVTL to FP32.  Row 1: FMLAL(acc, row1, 1.0) adds f32(row1).
-            // Then horizontal pairwise add + x63.75 in FP32.
+            // UV: 2x2 box average -> interleaved UVUV uint8
             {
-                float16x8_t u0lo = vreinterpretq_f16_u16(vld1q_u16(su0 + x));
-                float16x8_t u0hi = vreinterpretq_f16_u16(vld1q_u16(su0 + x + 8));
-                float16x8_t u1lo = vreinterpretq_f16_u16(vld1q_u16(su1 + x));
-                float16x8_t u1hi = vreinterpretq_f16_u16(vld1q_u16(su1 + x + 8));
-
-                float32x4_t us0 = vcvt_f32_f16(vget_low_f16(u0lo));
-                float32x4_t us1 = vcvt_f32_f16(vget_high_f16(u0lo));
-                float32x4_t us2 = vcvt_f32_f16(vget_low_f16(u0hi));
-                float32x4_t us3 = vcvt_f32_f16(vget_high_f16(u0hi));
-                us0 = vfmlalq_low_f16(us0, u1lo, ones);
-                us1 = vfmlalq_high_f16(us1, u1lo, ones);
-                us2 = vfmlalq_low_f16(us2, u1hi, ones);
-                us3 = vfmlalq_high_f16(us3, u1hi, ones);
-
-                float32x4_t uh01 = vmulq_f32(vpaddq_f32(us0, us1), s63_75);
-                float32x4_t uh23 = vmulq_f32(vpaddq_f32(us2, us3), s63_75);
-                int16x8_t ui = vcombine_s16(vqmovn_s32(vcvtaq_s32_f32(uh01)), vqmovn_s32(vcvtaq_s32_f32(uh23)));
-
-                float16x8_t v0lo = vreinterpretq_f16_u16(vld1q_u16(sv0 + x));
-                float16x8_t v0hi = vreinterpretq_f16_u16(vld1q_u16(sv0 + x + 8));
-                float16x8_t v1lo = vreinterpretq_f16_u16(vld1q_u16(sv1 + x));
-                float16x8_t v1hi = vreinterpretq_f16_u16(vld1q_u16(sv1 + x + 8));
-
-                float32x4_t vs0 = vcvt_f32_f16(vget_low_f16(v0lo));
-                float32x4_t vs1 = vcvt_f32_f16(vget_high_f16(v0lo));
-                float32x4_t vs2 = vcvt_f32_f16(vget_low_f16(v0hi));
-                float32x4_t vs3 = vcvt_f32_f16(vget_high_f16(v0hi));
-                vs0 = vfmlalq_low_f16(vs0, v1lo, ones);
-                vs1 = vfmlalq_high_f16(vs1, v1lo, ones);
-                vs2 = vfmlalq_low_f16(vs2, v1hi, ones);
-                vs3 = vfmlalq_high_f16(vs3, v1hi, ones);
-
-                float32x4_t vh01 = vmulq_f32(vpaddq_f32(vs0, vs1), s63_75);
-                float32x4_t vh23 = vmulq_f32(vpaddq_f32(vs2, vs3), s63_75);
-                int16x8_t vi = vcombine_s16(vqmovn_s32(vcvtaq_s32_f32(vh01)), vqmovn_s32(vcvtaq_s32_f32(vh23)));
+                const auto uLow = ReduceUv8(vld1q_u16(su0 + x), vld1q_u16(su1 + x));
+                const auto uHigh = ReduceUv8(vld1q_u16(su0 + x + 8), vld1q_u16(su1 + x + 8));
+                const auto vLow = ReduceUv8(vld1q_u16(sv0 + x), vld1q_u16(sv1 + x));
+                const auto vHigh = ReduceUv8(vld1q_u16(sv0 + x + 8), vld1q_u16(sv1 + x + 8));
+                int16x8_t ui = vqmovn_high_s32(vqmovn_s32(uLow), uHigh);
+                int16x8_t vi = vqmovn_high_s32(vqmovn_s32(vLow), vHigh);
 
                 uint8x8x2_t uv = { { vqmovun_s16(ui), vqmovun_s16(vi) } };
                 vst2_u8(duv + x, uv);
@@ -1310,37 +1623,93 @@ void ConvertYuv444Fp16ToNv12Impl(const uint16_t* yIn, const uint16_t* uIn, const
                 return static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
             };
 
-            // UV: widen to FP32, sum 4 values, x63.75, round (bit-exact)
-            auto cvtUv = [&](uint16_t a, uint16_t b, uint16_t c, uint16_t d) -> uint8_t {
-                uint16x4_t h = vcreate_u16(static_cast<uint64_t>(a) | (static_cast<uint64_t>(c) << 16)
-                                           | (static_cast<uint64_t>(b) << 32) | (static_cast<uint64_t>(d) << 48));
-                float32x4_t f = vcvt_f32_f16(vreinterpret_f16_u16(h));
-                float32x2_t sums = vpadd_f32(vget_low_f32(f), vget_high_f32(f));
-                float32x2_t total = vpadd_f32(sums, sums);
-                float32x2_t scaled = vmul_f32(total, vget_low_f32(s63_75));
-                int32x2_t rounded = vcvta_s32_f32(scaled);
-                int32_t r = vget_lane_s32(rounded, 0);
-                return static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
-            };
-
             dy0[x] = cvtY(sy0[x]);
             dy0[x + 1] = cvtY(sy0[x + 1]);
             dy1[x] = cvtY(sy1[x]);
             dy1[x + 1] = cvtY(sy1[x + 1]);
 
-            duv[x] = cvtUv(su0[x], su0[x + 1], su1[x], su1[x + 1]);
-            duv[x + 1] = cvtUv(sv0[x], sv0[x + 1], sv1[x], sv1[x + 1]);
+            duv[x] = Fp16ChromaToU8(su0[x], su0[x + 1], su1[x], su1[x + 1]);
+            duv[x + 1] = Fp16ChromaToU8(sv0[x], sv0[x + 1], sv1[x], sv1[x + 1]);
+        }
+    }
+}
+
+void ConvertYuv444Fp16NhwcToNv12Impl(const uint16_t* yuv444In, std::size_t yuv444Stride, uint8_t* nv12Out,
+                                     std::size_t nv12Stride, int width, int height)
+{
+    uint8_t* nv12Y = nv12Out;
+    uint8_t* nv12Uv = nv12Out + nv12Stride * static_cast<std::size_t>(height);
+
+    const auto lumaScale = vreinterpretq_f16_u16(vdupq_n_u16(0x5bf8));
+    const auto zero = vdupq_n_f32(0.0f);
+
+    const int w16 = width & ~15;
+
+    const auto convertLuma = [&](const uint16x8_t values) {
+        const auto halves = vreinterpretq_f16_u16(values);
+        const auto low = vcvtaq_s32_f32(vfmlalq_low_f16(zero, halves, lumaScale));
+        const auto high = vcvtaq_s32_f32(vfmlalq_high_f16(zero, halves, lumaScale));
+        return vqmovun_s16(vqmovn_high_s32(vqmovn_s32(low), high));
+    };
+    const auto convertBlock = [&](const uint16_t* first, const uint16_t* second, uint8_t* firstLuma, uint8_t* secondLuma) {
+        const auto firstPixels = vld3q_u16(first);
+        vst1_u8(firstLuma, convertLuma(firstPixels.val[0]));
+        const auto secondPixels = vld3q_u16(second);
+        vst1_u8(secondLuma, convertLuma(secondPixels.val[0]));
+        return int32x4x2_t{ { ReduceUv8(firstPixels.val[1], secondPixels.val[1]),
+                              ReduceUv8(firstPixels.val[2], secondPixels.val[2]) } };
+    };
+    const auto toByte = [](const float value) {
+        return static_cast<uint8_t>(std::clamp(std::roundf(value), 0.0f, 255.0f));
+    };
+    auto rowPtr = [](const uint16_t* base, int rowIndex, std::size_t stride) -> const uint16_t* {
+        return reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(base)
+                                                 + static_cast<std::size_t>(rowIndex) * stride);
+    };
+
+    for (int row = 0; row < height; row += 2) {
+        const uint16_t* first = rowPtr(yuv444In, row, yuv444Stride);
+        const uint16_t* second = rowPtr(yuv444In, row + 1, yuv444Stride);
+        uint8_t* lumaFirst = nv12Y + static_cast<std::size_t>(row) * nv12Stride;
+        uint8_t* lumaSecond = lumaFirst + nv12Stride;
+        uint8_t* chromaRow = nv12Uv + static_cast<std::size_t>(row / 2) * nv12Stride;
+        int column = 0;
+        for (; column < w16; column += 16) {
+            const auto low = convertBlock(first + column * 3, second + column * 3, lumaFirst + column, lumaSecond + column);
+            const auto high = convertBlock(first + (column + 8) * 3, second + (column + 8) * 3, lumaFirst + column + 8,
+                                           lumaSecond + column + 8);
+            const uint8x8x2_t uv{ { vqmovun_s16(vqmovn_high_s32(vqmovn_s32(low.val[0]), high.val[0])),
+                                    vqmovun_s16(vqmovn_high_s32(vqmovn_s32(low.val[1]), high.val[1])) } };
+            vst2_u8(chromaRow + column, uv);
+        }
+        for (; width >= 8 && column < width; column += 8) {
+            const int start = std::min(column, width - 8);
+            const auto quantized =
+                convertBlock(first + start * 3, second + start * 3, lumaFirst + start, lumaSecond + start);
+            const auto uv = vzipq_s32(quantized.val[0], quantized.val[1]);
+            vst1_u8(chromaRow + start, vqmovun_s16(vqmovn_high_s32(vqmovn_s32(uv.val[0]), uv.val[1])));
+        }
+        for (; column < width; column += 2) {
+            lumaFirst[column] = toByte(Fp16To32(first[column * 3]) * 255.0f);
+            lumaFirst[column + 1] = toByte(Fp16To32(first[(column + 1) * 3]) * 255.0f);
+            lumaSecond[column] = toByte(Fp16To32(second[column * 3]) * 255.0f);
+            lumaSecond[column + 1] = toByte(Fp16To32(second[(column + 1) * 3]) * 255.0f);
+            for (int channel = 1; channel < 3; ++channel) {
+                chromaRow[column + channel - 1] =
+                    Fp16ChromaToU8(first[column * 3 + channel], first[(column + 1) * 3 + channel],
+                                   second[column * 3 + channel], second[(column + 1) * 3 + channel]);
+            }
         }
     }
 }
 }  // anonymous namespace
 #endif  // MLVC_ARCH_ARM64
 
-Nv12FrameView Yuv444Fp16ToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer)
+Nv12FrameView Yuv444Fp16NchwToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer)
 {
     const auto shape = yuv444.Shape();
     const auto strides = yuv444.Strides();
-    MLVC_ASSERT(strides[2] == 1);
+    MLVC_ASSERT(shape[0] == 3 && strides[2] == 1);
 
     const int height = shape[1];
     const int width = shape[2];
@@ -1354,8 +1723,26 @@ Nv12FrameView Yuv444Fp16ToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<st
 
     buffer.resize(static_cast<std::size_t>(height) * width * 3 / 2);
 
-    ConvertYuv444Fp16ToNv12Impl(yIn, uIn, vIn, yuv444Stride, reinterpret_cast<uint8_t*>(buffer.data()),
-                                static_cast<std::size_t>(width), width, height);
+    ConvertYuv444Fp16NchwToNv12Impl(yIn, uIn, vIn, yuv444Stride, reinterpret_cast<uint8_t*>(buffer.data()),
+                                    static_cast<std::size_t>(width), width, height);
+
+    return Nv12FrameView{ width, height, buffer };
+}
+
+Nv12FrameView Yuv444Fp16NhwcToNv12(const Tensor<uint16_t, 3>& yuv444, std::vector<std::byte>& buffer)
+{
+    const auto shape = yuv444.Shape();
+    const auto strides = yuv444.Strides();
+    MLVC_ASSERT(shape[2] == 3 && strides[1] == 3 && strides[2] == 1);
+    const int height = shape[0];
+    const int width = shape[1];
+    MLVC_ASSERT(width % 2 == 0 && height % 2 == 0);
+
+    const std::size_t yuv444Stride = static_cast<std::size_t>(strides[0]) * sizeof(uint16_t);
+    buffer.resize(static_cast<std::size_t>(height) * width * 3 / 2);
+
+    ConvertYuv444Fp16NhwcToNv12Impl(yuv444.Data().data(), yuv444Stride, reinterpret_cast<uint8_t*>(buffer.data()),
+                                    static_cast<std::size_t>(width), width, height);
 
     return Nv12FrameView{ width, height, buffer };
 }

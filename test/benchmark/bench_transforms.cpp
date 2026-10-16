@@ -19,34 +19,61 @@ using namespace libmlvc;
 // Benchmarks for image format transforms
 // ------------------------------------------------------------
 
-static void BM_Nv12ToYuv444Fp16(benchmark::State& state)
+static void BM_Nv12ToYuv444Fp16Nchw(benchmark::State& state)
 {
-    const int width = 960;
-    const int height = 540;
-    const int modelWidth = 960;
-    const int modelHeight = 544;
+    const int width = static_cast<int>(state.range(0));
+    const int height = static_cast<int>(state.range(1));
+    const int modelWidth = width;
+    const int modelHeight = (height + 7) & ~7;
     std::vector<std::byte> bytes(height * width * 3 / 2, std::byte(128));
     Nv12FrameView frame{ width, height, bytes };
     Tensor<uint16_t, 3> output({ 3, modelHeight, modelWidth });
     output.SetValue(Fp32To16(0.5f));
     for (auto _ : state) {
-        Nv12ToYuv444Fp16(frame, output);
+        Nv12ToYuv444Fp16Nchw(frame, output);
     }
 }
-BENCHMARK(BM_Nv12ToYuv444Fp16);
+BENCHMARK(BM_Nv12ToYuv444Fp16Nchw)->Args({ 960, 540 })->Args({ 426, 240 });
 
-static void BM_Yuv444Fp16ToNv12(benchmark::State& state)
+static void BM_Nv12ToYuv444Fp16Nhwc(benchmark::State& state)
 {
-    const int width = 960;
-    const int height = 540;
+    const int width = static_cast<int>(state.range(0));
+    const int height = static_cast<int>(state.range(1));
+    std::vector<std::byte> bytes(height * width * 3 / 2, std::byte{ 128 });
+    const Nv12FrameView frame{ width, height, bytes };
+    Tensor<uint16_t, 3> output{ std::array{ (height + 7) & ~7, width, 3 } };
+    output.SetValue(Fp32To16(0.5f));
+    for (auto iteration : state) {
+        Nv12ToYuv444Fp16Nhwc(frame, output);
+    }
+}
+BENCHMARK(BM_Nv12ToYuv444Fp16Nhwc)->Args({ 960, 540 })->Args({ 426, 240 });
+
+static void BM_Yuv444Fp16NchwToNv12(benchmark::State& state)
+{
+    const int width = static_cast<int>(state.range(0));
+    const int height = static_cast<int>(state.range(1));
     Tensor<uint16_t, 3> yuv444({ 3, height, width });
     yuv444.SetValue(Fp32To16(0.5f));
     std::vector<std::byte> buffer;
     for (auto _ : state) {
-        Yuv444Fp16ToNv12(yuv444, buffer);
+        Yuv444Fp16NchwToNv12(yuv444, buffer);
     }
 }
-BENCHMARK(BM_Yuv444Fp16ToNv12);
+BENCHMARK(BM_Yuv444Fp16NchwToNv12)->Args({ 960, 540 })->Args({ 426, 240 });
+
+static void BM_Yuv444Fp16NhwcToNv12(benchmark::State& state)
+{
+    const int width = static_cast<int>(state.range(0));
+    const int height = static_cast<int>(state.range(1));
+    Tensor<uint16_t, 3> input{ std::array{ height, width, 3 } };
+    input.SetValue(Fp32To16(0.5f));
+    std::vector<std::byte> buffer{};
+    for (auto iteration : state) {
+        Yuv444Fp16NhwcToNv12(input, buffer);
+    }
+}
+BENCHMARK(BM_Yuv444Fp16NhwcToNv12)->Args({ 960, 540 })->Args({ 426, 240 });
 
 // ------------------------------------------------------------
 // Benchmarks for other transforms
@@ -79,7 +106,7 @@ static void BM_InputTransformerLandscape(benchmark::State& state)
     Nv12FrameView frame{ width, height, bytes };
     Tensor<uint16_t, 3> output({ 3, modelHeight, modelWidth });
 
-    InputTransformer inputTransformer;
+    InputTransformer inputTransformer{ TensorLayout::NCHW };
     for (auto _ : state) {
         inputTransformer.Transform(frame, modelWidth, modelHeight, output);
     }
@@ -96,7 +123,7 @@ static void BM_InputTransformerPortrait(benchmark::State& state)
     Nv12FrameView frame{ width, height, bytes };
     Tensor<uint16_t, 3> output({ 3, modelHeight, modelWidth });
 
-    InputTransformer inputTransformer;
+    InputTransformer inputTransformer{ TensorLayout::NCHW };
     for (auto _ : state) {
         inputTransformer.Transform(frame, modelWidth, modelHeight, output);
     }
@@ -109,8 +136,7 @@ static void BM_OutputTransformerLandscape(benchmark::State& state)
     const int height = 540;
     Tensor<uint16_t, 3> modelOutput({ 3, 544, 960 });
 
-    OutputTransformer<mlvc_f16_t> outputTransformer;
-    outputTransformer.Initialize();
+    OutputTransformer<mlvc_f16_t> outputTransformer{ TensorLayout::NCHW };
     for (auto _ : state) {
         auto res = outputTransformer.Transform(modelOutput, width, height, { 0, 0, 0, 8 }, false);
         (void)res;
@@ -124,8 +150,7 @@ static void BM_OutputTransformerPortrait(benchmark::State& state)
     const int height = 960;
     Tensor<uint16_t, 3> modelOutput({ 3, 544, 960 });
 
-    OutputTransformer<mlvc_f16_t> outputTransformer;
-    outputTransformer.Initialize();
+    OutputTransformer<mlvc_f16_t> outputTransformer{ TensorLayout::NCHW };
     for (auto _ : state) {
         auto res = outputTransformer.Transform(modelOutput, width, height, { 0, 0, 0, 8 }, true);
         (void)res;

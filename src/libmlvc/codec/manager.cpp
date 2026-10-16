@@ -185,7 +185,7 @@ MlvcManagerImpl::MlvcManagerImpl(const ManagerParams& params)
     : m_params(params)
     , m_info{
         .enableModelCache = params.enableModelCache,
-        .enableSessionCaching = params.enableSessionCaching,
+        .enableSessionPreloading = params.enableSessionPreloading,
     }
 {
     if (m_params.cacheDir.empty()) {
@@ -211,9 +211,9 @@ expected<void> MlvcManagerImpl::Initialize(const std::filesystem::path& bundlesD
     const std::span<const MlvcVersion> selectedVersions = versions.empty() ? defaultVersions : versions;
 
     MLVC_LOG_INFO(
-        "Initializing MlvcManager from bundles dir: compute_unit=%s, enable_model_cache=%d, enable_session_caching=%d, "
-        "versions=[%s]",
-        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionCaching,
+        "Initializing MlvcManager from bundles dir: compute_unit=%s, enable_model_cache=%d, "
+        "enable_session_preloading=%d, versions=[%s]",
+        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionPreloading,
         MlvcVersions2Str(selectedVersions).c_str());
 
     if (!IsPlatformSupported()) {
@@ -226,6 +226,12 @@ expected<void> MlvcManagerImpl::Initialize(const std::filesystem::path& bundlesD
         return ret.error();
     }
 
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Reading model bundles" });
+    }
+    if (cancelToken.IsCancelled()) {
+        return make_error_code(Error::operation_cancelled);
+    }
     auto bundleBlobs = LoadModelBundles(bundlesDir.empty() ? GetDefaultModelBundlesDir() : bundlesDir, selectedVersions,
                                         m_inferenceEngine->GetInfo());
     if (!bundleBlobs) {
@@ -247,8 +253,8 @@ expected<void> MlvcManagerImpl::Initialize(std::span<const std::span<const std::
         return make_error_code(Error::invalid_argument);
     }
     MLVC_LOG_INFO(
-        "Initializing MlvcManager from blobs: compute_unit=%s, enable_model_cache=%d, enable_session_caching=%d",
-        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionCaching);
+        "Initializing MlvcManager from blobs: compute_unit=%s, enable_model_cache=%d, enable_session_preloading=%d",
+        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionPreloading);
 
     if (!IsPlatformSupported()) {
         MLVC_LOG_ERROR("Platform is not supported for MLVC");
@@ -375,6 +381,9 @@ expected<InferenceSessionPtr> MlvcManagerImpl::GetInferenceSession(const MlvcVer
 expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
                                                     const InitializeProgressCallback& progressCallback)
 {
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Setting up inference engine" });
+    }
     ModelCache::Instance().SetRootCacheDir(m_params.cacheDir / "models");
 
     ComputeUnit computeUnit = m_params.computeUnit;
@@ -451,6 +460,9 @@ expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
     m_info.deviceLuid = engineInfo.deviceLuid;
     m_info.driverVersion = engineInfo.driverVersion;
     m_info.driverDate = engineInfo.driverDate;
+    if (progressCallback) {
+        progressCallback(InferenceBackendReady{});
+    }
     return {};
 }
 
@@ -478,8 +490,8 @@ expected<void> MlvcManagerImpl::LoadBundles(std::span<const std::span<const std:
             return make_error_code(Error::operation_cancelled);
         }
 
-        ModelBundle bundle(bundleBlob, *m_inferenceEngine, m_params.enableModelCache, m_params.enableSessionCaching);
-        if (auto ret = bundle.Initialize(cancelToken, progressCallback); !ret) {
+        ModelBundle bundle(*m_inferenceEngine, m_params.enableModelCache, m_params.enableSessionPreloading);
+        if (auto ret = bundle.Initialize(bundleBlob, cancelToken, progressCallback); !ret) {
             MLVC_LOG_ERROR("Failed to initialize bundle: %s", ret.error().message().c_str());
             return ret.error();
         }

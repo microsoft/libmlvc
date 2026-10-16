@@ -37,21 +37,16 @@ expected<std::vector<std::byte>> ReadFile(const std::filesystem::path& path)
     return data;
 }
 
-expected<BundleManifest> PeekManifest(std::span<const std::byte> bundleBlob)
+expected<BundleManifest> PeekManifest(const std::filesystem::path& bundlePath)
 {
-    // TODO: can be optimized to extract only bundle_manifest.json if needed
-    auto entries = ExtractTar(bundleBlob);
-    if (!entries) {
-        MLVC_LOG_ERROR("Failed to extract tar bundle for peeking manifest: %s", entries.error().message().c_str());
-        return entries.error();
-    }
-    const auto manifestIt = entries.value().find("bundle_manifest.json");
-    if (manifestIt == entries.value().end()) {
-        MLVC_LOG_ERROR("bundle_manifest.json not found in bundle for peeking manifest");
-        return make_error_code(Error::io_error);
+    auto manifestData = ReadTarEntry(bundlePath, "bundle_manifest.json");
+    if (!manifestData) {
+        MLVC_LOG_ERROR("Failed to read bundle_manifest.json for peeking manifest: %s",
+                       manifestData.error().message().c_str());
+        return manifestData.error();
     }
 
-    auto res = BundleManifest::FromJsonBuffer(manifestIt->second);
+    auto res = BundleManifest::FromJsonBuffer(manifestData.value());
     if (!res) {
         MLVC_LOG_ERROR("Failed to parse bundle_manifest.json for peeking manifest: %s", res.error().message().c_str());
         return res.error();
@@ -127,33 +122,26 @@ class BundleBlob {
 public:
     static expected<BundleBlob> FromPath(const std::filesystem::path& path)
     {
-        auto fileData = ReadFile(path);
-        if (!fileData) {
-            MLVC_LOG_ERROR("Failed to read bundle file: %s, error: %s", path.filename().string().c_str(),
-                           fileData.error().message().c_str());
-            return fileData.error();
-        }
-
-        auto manifest = PeekManifest(fileData.value());
+        auto manifest = PeekManifest(path);
         if (!manifest) {
             MLVC_LOG_ERROR("Failed to peek manifest from bundle file: %s, error: %s", path.filename().string().c_str(),
                            manifest.error().message().c_str());
             return manifest.error();
         }
 
-        return BundleBlob{ std::move(manifest.value()), std::move(fileData.value()) };
+        return BundleBlob{ std::move(manifest.value()), path };
     }
 
-    BundleBlob(BundleManifest manifest, std::vector<std::byte> data)
-        : m_manifest(std::move(manifest)), m_data(std::move(data))
+    BundleBlob(BundleManifest manifest, std::filesystem::path path)
+        : m_manifest(std::move(manifest)), m_path(std::move(path))
     {
     }
     const BundleManifest& GetManifest() const { return m_manifest; }
-    std::vector<std::byte> TakeData() { return std::move(m_data); }
+    expected<std::vector<std::byte>> ReadData() const { return ReadFile(m_path); }
 
 private:
     BundleManifest m_manifest;
-    std::vector<std::byte> m_data;
+    std::filesystem::path m_path;
 };
 
 }  // namespace
@@ -227,8 +215,10 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
 
     std::vector<std::vector<std::byte>> res;
     res.reserve(bundlesMap.size());
-    for (auto& bundleBlob : bundlesMap | std::views::values) {
-        res.push_back(bundleBlob.TakeData());
+    for (const auto& bundleBlob : bundlesMap | std::views::values) {
+        auto data = bundleBlob.ReadData();
+        if (!data) return data.error();
+        res.push_back(std::move(data.value()));
     }
     return res;
 }
@@ -237,16 +227,13 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
 // ModelBundle
 // ----------------------------------------------------------------
 
-ModelBundle::ModelBundle(std::span<const std::byte> bundleBlob, IInferenceEngine& engine, bool enableModelCache,
-                         bool enableSessionCaching)
-    : m_bundleBlob(bundleBlob.begin(), bundleBlob.end())
-    , m_engine(engine)
-    , m_enableModelCache(enableModelCache)
-    , m_enableSessionCaching(enableSessionCaching)
+ModelBundle::ModelBundle(IInferenceEngine& engine, bool enableModelCache, bool enableSessionPreloading)
+    : m_engine(engine), m_enableModelCache(enableModelCache), m_enableSessionPreloading(enableSessionPreloading)
 {
 }
 
-expected<void> ModelBundle::Initialize(CancelToken cancelToken, const InitializeProgressCallback& progressCallback)
+expected<void> ModelBundle::Initialize(std::span<const std::byte> bundleBlob, CancelToken cancelToken,
+                                       const InitializeProgressCallback& progressCallback)
 {
     auto checkpoint = [&cancelToken, &progressCallback](const std::string& status) -> expected<void> {
         if (progressCallback) progressCallback(StatusMessage{ status });
@@ -258,21 +245,22 @@ expected<void> ModelBundle::Initialize(CancelToken cancelToken, const Initialize
     };
 
     // Extract bundle files
+    BundleFiles bundleFiles;
     {
         if (auto ret = checkpoint("Extracting bundle files"); !ret) return ret.error();
-        auto entries = ExtractTar(m_bundleBlob);
+        auto entries = ExtractTar(bundleBlob);
         if (!entries) {
             MLVC_LOG_ERROR("Failed to extract tar: %s", entries.error().message().c_str());
             return entries.error();
         }
-        m_bundleFiles = std::move(entries.value());
+        bundleFiles = std::move(entries.value());
     }
 
     // Parse manifest
     {
         if (auto ret = checkpoint("Parsing model manifest"); !ret) return ret.error();
-        const auto manifestIt = m_bundleFiles.find("bundle_manifest.json");
-        if (manifestIt == m_bundleFiles.end()) {
+        const auto manifestIt = bundleFiles.find("bundle_manifest.json");
+        if (manifestIt == bundleFiles.end()) {
             MLVC_LOG_ERROR("Manifest file not found in model bundle");
             return make_error_code(Error::io_error);
         }
@@ -296,7 +284,7 @@ expected<void> ModelBundle::Initialize(CancelToken cancelToken, const Initialize
 
     // Load scale decoder data
     if (auto ret = checkpoint("Loading scale decoder data"); !ret) return ret.error();
-    if (auto ret = LoadScaleDecoderData(); !ret) {
+    if (auto ret = LoadScaleDecoderData(bundleFiles); !ret) {
         MLVC_LOG_ERROR("Failed to load scale decoder data for bundle %s %s: %s", m_manifest.bundleName.c_str(),
                        m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
         return ret.error();
@@ -304,19 +292,43 @@ expected<void> ModelBundle::Initialize(CancelToken cancelToken, const Initialize
 
     // Load PMFs
     if (auto ret = checkpoint("Loading PMFs"); !ret) return ret.error();
-    if (auto ret = LoadPmfs(); !ret) {
+    if (auto ret = LoadPmfs(bundleFiles); !ret) {
         MLVC_LOG_ERROR("Failed to load PMFs for bundle %s %s: %s", m_manifest.bundleName.c_str(),
                        m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
         return ret.error();
     }
 
-    // Cache sessions if enabled
-    if (m_enableSessionCaching) {
-        if (auto ret = checkpoint("Caching inference sessions"); !ret) return ret.error();
-        if (auto ret = CacheSessions(cancelToken, progressCallback); !ret) {
-            MLVC_LOG_ERROR("Failed to cache sessions for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+    // Compile the missing models into the model cache
+    bool modelsCached = false;
+    if (m_enableModelCache) {
+        if (auto ret = checkpoint("Preparing model cache"); !ret) return ret.error();
+        auto cached = PrepareModelCache(bundleFiles, cancelToken, progressCallback);
+        if (!cached) {
+            MLVC_LOG_ERROR("Failed to prepare model cache for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+                           m_manifest.mlvcVersion.ToString().c_str(), cached.error().message().c_str());
+            return cached.error();
+        }
+        modelsCached = cached.value();
+    }
+
+    // Preload sessions if enabled
+    if (m_enableSessionPreloading) {
+        if (auto ret = checkpoint("Preloading inference sessions"); !ret) return ret.error();
+        if (auto ret = PreloadSessions(bundleFiles, cancelToken, progressCallback); !ret) {
+            MLVC_LOG_ERROR("Failed to preload sessions for bundle %s %s: %s", m_manifest.bundleName.c_str(),
                            m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
             return ret.error();
+        }
+    }
+
+    // Keep a copy of the bundle data if sessions are created on demand from uncached models
+    if (!m_enableSessionPreloading && !modelsCached) {
+        MLVC_LOG_INFO("Keeping a copy of the bundle data (%.1lf MB)",
+                      static_cast<double>(bundleBlob.size()) / (1024.0 * 1024.0));
+        m_bundleBlob.assign(bundleBlob.begin(), bundleBlob.end());
+        for (const auto& [path, data] : bundleFiles) {
+            const auto offset = static_cast<size_t>(data.data() - bundleBlob.data());
+            m_bundleFiles[path] = std::span<const std::byte>(m_bundleBlob).subspan(offset, data.size());
         }
     }
 
@@ -498,10 +510,10 @@ expected<InferenceSessionPtr> ModelBundle::GetInferenceSession(const std::string
         return sessionIt->second;
     }
 
-    return CreateInferenceSession(modelId, partId);
+    return CreateInferenceSession(modelId, partId, m_bundleFiles);
 }
 
-expected<void> ModelBundle::LoadScaleDecoderData()
+expected<void> ModelBundle::LoadScaleDecoderData(const BundleFiles& files)
 {
     for (const auto& [modelId, modelManifest] : m_manifest.modelManifests) {
         auto data = std::make_shared<ScaleDecoderData>();
@@ -510,15 +522,15 @@ expected<void> ModelBundle::LoadScaleDecoderData()
     return {};
 }
 
-expected<void> ModelBundle::LoadPmfs()
+expected<void> ModelBundle::LoadPmfs(const BundleFiles& files)
 {
     for (const auto& [modelId, modelManifest] : m_manifest.modelManifests) {
         // Gaussian PMFs
         {
             const auto& pmfPath = modelManifest.gaussianPmfPath;
             if (m_gaussianPmfs.find(pmfPath) == m_gaussianPmfs.end()) {
-                const auto it = m_bundleFiles.find(pmfPath);
-                if (it == m_bundleFiles.end()) {
+                const auto it = files.find(pmfPath);
+                if (it == files.end()) {
                     MLVC_LOG_ERROR("Gaussian PMF file %s not found in bundle for model %s", pmfPath.c_str(),
                                    modelId.c_str());
                     return make_error_code(Error::io_error);
@@ -542,8 +554,8 @@ expected<void> ModelBundle::LoadPmfs()
         {
             const auto& pmfPath = modelManifest.bitEstimatorPmfPath;
             if (m_bitEstimatorPmfs.find(pmfPath) == m_bitEstimatorPmfs.end()) {
-                const auto it = m_bundleFiles.find(pmfPath);
-                if (it == m_bundleFiles.end()) {
+                const auto it = files.find(pmfPath);
+                if (it == files.end()) {
                     MLVC_LOG_ERROR("Bit Estimator PMF file %s not found in bundle for model %s", pmfPath.c_str(),
                                    modelId.c_str());
                     return make_error_code(Error::io_error);
@@ -562,20 +574,53 @@ expected<void> ModelBundle::LoadPmfs()
     return {};
 }
 
-expected<void> ModelBundle::CacheSessions(CancelToken cancelToken, const InitializeProgressCallback& progressCallback)
+expected<bool> ModelBundle::PrepareModelCache(const BundleFiles& files, CancelToken cancelToken,
+                                              const InitializeProgressCallback& progressCallback)
 {
-    MLVC_LOG_INFO("Caching inference sessions for bundle %s...", m_manifest.mlvcVersion.ToString().c_str());
+    MLVC_LOG_INFO("Preparing model cache for bundle %s...", m_manifest.mlvcVersion.ToString().c_str());
     for (const auto& [modelId, modelManifest] : m_manifest.modelManifests) {
-        for (const auto& modelPartId : modelManifest.modelParts | std::views::keys) {
+        for (const auto& [modelPartId, bundlePart] : modelManifest.modelParts) {
             if (progressCallback) {
-                progressCallback(StatusMessage{ "Compiling model " + modelId + " part " + ModelPartIdToString(modelPartId) });
+                progressCallback(
+                    StatusMessage{ "Preparing model cache for " + modelId + " " + ModelPartIdToString(modelPartId) });
             }
             // Cancellation should be checked after progress callback, as user might trigger cancellation from the callback
             if (cancelToken.IsCancelled()) {
-                MLVC_LOG_INFO("Session caching cancelled");
+                MLVC_LOG_INFO("Model cache preparation cancelled");
                 return make_error_code(Error::operation_cancelled);
             }
-            auto session = CreateInferenceSession(modelId, modelPartId);
+            auto source = GetModelSource(modelId, bundlePart, files);
+            if (!source) return source.error();
+            auto cached = m_engine.PrepareModelCache(bundlePart.registryId, source->modelData, source->weightsData,
+                                                     source->cacheKey);
+            if (!cached) {
+                MLVC_LOG_ERROR("Failed to prepare model cache for model %s part %s: %s", modelId.c_str(),
+                               ModelPartIdToString(modelPartId), cached.error().message().c_str());
+                return cached.error();
+            }
+            // The inference engine has no model cache
+            if (!cached.value()) return false;
+        }
+    }
+    return true;
+}
+
+expected<void> ModelBundle::PreloadSessions(const BundleFiles& files, CancelToken cancelToken,
+                                            const InitializeProgressCallback& progressCallback)
+{
+    MLVC_LOG_INFO("Preloading inference sessions for bundle %s...", m_manifest.mlvcVersion.ToString().c_str());
+    for (const auto& [modelId, modelManifest] : m_manifest.modelManifests) {
+        for (const auto& modelPartId : modelManifest.modelParts | std::views::keys) {
+            if (progressCallback) {
+                progressCallback(
+                    StatusMessage{ "Preloading session for " + modelId + " " + ModelPartIdToString(modelPartId) });
+            }
+            // Cancellation should be checked after progress callback, as user might trigger cancellation from the callback
+            if (cancelToken.IsCancelled()) {
+                MLVC_LOG_INFO("Session preloading cancelled");
+                return make_error_code(Error::operation_cancelled);
+            }
+            auto session = CreateInferenceSession(modelId, modelPartId, files);
             if (!session) {
                 MLVC_LOG_ERROR("Failed to create inference session for model %s part %s: %s", modelId.c_str(),
                                ModelPartIdToString(modelPartId), session.error().message().c_str());
@@ -584,11 +629,44 @@ expected<void> ModelBundle::CacheSessions(CancelToken cancelToken, const Initial
             m_inferenceSessions[{ modelId, modelPartId }] = std::move(session.value());
         }
     }
-    MLVC_LOG_INFO("Cached %zu inference sessions", m_inferenceSessions.size());
+    MLVC_LOG_INFO("Preloaded %zu inference sessions", m_inferenceSessions.size());
     return {};
 }
 
-expected<InferenceSessionPtr> ModelBundle::CreateInferenceSession(const std::string& modelId, const ModelPartId partId) const
+expected<ModelBundle::ModelSource> ModelBundle::GetModelSource(const std::string& modelId, const ModelPartManifest& part,
+                                                               const BundleFiles& files) const
+{
+    const auto registryIt = m_manifest.modelRegistry.find(part.registryId);
+    if (registryIt == m_manifest.modelRegistry.end()) {
+        MLVC_LOG_ERROR("Registry entry %s not found in manifest for model %s", part.registryId.c_str(), modelId.c_str());
+        return make_error_code(Error::invalid_argument);
+    }
+    const auto& registryEntry = registryIt->second;
+
+    ModelSource source;
+    source.cacheKey = m_enableModelCache ? registryEntry.sha256.substr(0, 16) : "";
+    std::replace(source.cacheKey.begin(), source.cacheKey.end(), '.', '_');
+    if (files.empty()) {
+        return source;
+    }
+
+    const auto modelIt = files.find(registryEntry.modelPath);
+    if (modelIt == files.end()) {
+        MLVC_LOG_ERROR("Model file %s not found in bundle", registryEntry.modelPath.c_str());
+        return make_error_code(Error::invalid_argument);
+    }
+    source.modelData = modelIt->second;
+
+    if (const auto& weightsPath = registryEntry.weightsPath) {
+        if (const auto weightsIt = files.find(*weightsPath); weightsIt != files.end()) {
+            source.weightsData[*weightsPath] = weightsIt->second;
+        }
+    }
+    return source;
+}
+
+expected<InferenceSessionPtr> ModelBundle::CreateInferenceSession(const std::string& modelId, const ModelPartId partId,
+                                                                  const BundleFiles& files) const
 {
     const auto modelIt = m_manifest.modelManifests.find(modelId);
     if (modelIt == m_manifest.modelManifests.end()) {
@@ -607,46 +685,28 @@ expected<InferenceSessionPtr> ModelBundle::CreateInferenceSession(const std::str
                   ModelPartIdToString(partId), bundlePart.registryId.c_str(),
                   bundlePart.functionName.value_or("N/A").c_str());
 
-    const auto registryIt = m_manifest.modelRegistry.find(bundlePart.registryId);
-    if (registryIt == m_manifest.modelRegistry.end()) {
-        MLVC_LOG_ERROR("Registry entry %s not found in manifest for model %s", bundlePart.registryId.c_str(),
-                       modelId.c_str());
-        return make_error_code(Error::invalid_argument);
-    }
-    const auto& registryEntry = registryIt->second;
-
-    if (m_bundleFiles.find(registryEntry.modelPath) == m_bundleFiles.end()) {
-        MLVC_LOG_ERROR("Model file %s not found in bundle", registryEntry.modelPath.c_str());
-        return make_error_code(Error::invalid_argument);
-    }
-    const auto& modelData = m_bundleFiles.at(registryEntry.modelPath);
-
-    std::map<std::string, std::span<const std::byte>> externalDataBuffers;
-    const auto& weightsPath = registryEntry.weightsPath;
-    if (weightsPath && m_bundleFiles.find(weightsPath.value()) != m_bundleFiles.end()) {
-        const auto& weightsData = m_bundleFiles.at(weightsPath.value());
-        externalDataBuffers[weightsPath.value()] = weightsData;
-    }
-
-    const auto& shortHash = registryEntry.sha256.substr(0, 16);
-    std::string cacheKey = m_enableModelCache ? shortHash : "";
-    std::replace(cacheKey.begin(), cacheKey.end(), '.', '_');
+    auto source = GetModelSource(modelId, bundlePart, files);
+    if (!source) return source.error();
 
     std::string sessionName = modelId + "/" + ModelPartIdToString(partId);
     if (bundlePart.functionName) {
         sessionName += "/" + bundlePart.functionName.value();
     }
-    auto session = m_engine.CreateSession(sessionName, modelData, externalDataBuffers, cacheKey, bundlePart.functionName);
+    auto session = m_engine.CreateSession(sessionName, source->modelData, source->weightsData, source->cacheKey,
+                                          bundlePart.functionName);
     if (!session) {
         MLVC_LOG_ERROR("Failed to create inference session for model %s part %s: %s", modelId.c_str(),
                        ModelPartIdToString(partId), session.error().message().c_str());
         return session.error();
     }
 
-    if (auto ret = WarmUpSession(session.value()); !ret) {
-        MLVC_LOG_ERROR("Failed to warm up inference session for model %s part %s: %s", modelId.c_str(),
-                       ModelPartIdToString(partId), ret.error().message().c_str());
-        return ret.error();
+    // Models compiled for the NPU don't benefit from a warm-up
+    if (m_engine.GetInfo().computeUnit != ComputeUnit::NPU) {
+        if (auto ret = WarmUpSession(session.value()); !ret) {
+            MLVC_LOG_ERROR("Failed to warm up inference session for model %s part %s: %s", modelId.c_str(),
+                           ModelPartIdToString(partId), ret.error().message().c_str());
+            return ret.error();
+        }
     }
 
     return session.value();

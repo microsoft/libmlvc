@@ -3,6 +3,7 @@
 
 #include "arguments.hpp"
 #include "benchmark_runner.hpp"
+#include "metrics_collector.hpp"
 #include "reporting.hpp"
 
 #include "libmlvc_support/dataset.hpp"
@@ -21,11 +22,13 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #if defined(_WIN32)
@@ -47,19 +50,21 @@ expected<void> SetBinaryMode(std::FILE* file)
     return {};
 }
 
-expected<MlvcManager> CreateManager(const CommonArguments& args)
+expected<MlvcManager> CreateManager(const CommonArguments& args, InitializeProgressCallback progressCallback = nullptr)
 {
     std::cerr << "Creating manager...\n";
     const ManagerParams managerParams{
         .computeUnit = args.computeUnit,
+        .cacheDir = args.cacheDir,
         .enableModelCache = args.enableModelCache,
-        .enableSessionCaching = args.enableSessionCaching,
+        .enableSessionPreloading = args.enableSessionPreloading,
         .winmlInitMode = args.winmlInitMode,
     };
 
     const std::filesystem::path modelBundlesDir(args.modelBundlesDir);
     const auto versionsToLoad = std::array{ args.mlvcVersion };
-    auto manager = MlvcManager::CreateFromDirectory(managerParams, modelBundlesDir, versionsToLoad);
+    auto manager =
+        MlvcManager::CreateFromDirectory(managerParams, modelBundlesDir, versionsToLoad, {}, std::move(progressCallback));
     if (!manager) {
         std::cerr << "Error: Failed to initialize MLVC manager: " << manager.error().message() << '\n';
         return manager.error();
@@ -256,16 +261,38 @@ expected<void> RunDecode(const DecodeArguments& args)
 
 expected<void> RunBenchmark(const BenchmarkArguments& args)
 {
-    PrintRuntimeInfo();
-    auto managerResult = CreateManager(args);
-    if (!managerResult) return managerResult.error();
-    const auto& manager = managerResult.value();
+    constexpr struct {
+        const char* start = "start";
+        const char* engine = "engine";
+        const char* mlvc = "mlvc";
+        const char* encode = "encode";
+        const char* run = "run";
+        const char* stop = "stop";
+        const char* exit = "exit";
+    } phases{};
 
-    if (args.waitSeconds > 0) {
-        std::cerr << "Waiting " << args.waitSeconds << " seconds before loading benchmark data...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(args.waitSeconds));
+    std::unique_ptr<MetricsCollector> collector;
+    if (args.profile) {
+        collector = std::make_unique<MetricsCollector>();
+        if (auto ret = collector->Start(std::chrono::milliseconds(args.profileIntervalMs)); !ret) return ret.error();
     }
+    MetricsCollector* const metrics = collector.get();
+    // Profiling is best effort; the collector reports its own errors
+    const auto record = [metrics](std::string phase, std::string event) {
+        if (metrics) metrics->Record(std::move(phase), std::move(event));
+    };
+    const auto waitAfter = [metrics](int seconds, const char* phase, const std::string& what) {
+        if (seconds <= 0) return;
+        std::cerr << "Waiting " << seconds << " seconds after " << what << "...\n";
+        if (metrics) metrics->RecordWait(phase, "Waiting after " + what);
+        std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    };
 
+    record(phases.start, "Detecting platform");
+    PrintRuntimeInfo();
+
+    // Load the input first, so that the runners start right after the waits
+    record(phases.start, "Loading input frames");
     const auto& outputDir = args.outputDirectory;
     std::error_code ec;
     if (!std::filesystem::exists(outputDir, ec)) {
@@ -294,10 +321,27 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
     }
     auto inputFrames = std::move(frames.value());
 
+    record(phases.engine, "Creating manager");
+    std::atomic<bool> mlvcStarted = false;
+    auto managerResult = CreateManager(args, [&](const InitializeProgressEvent& event) {
+        if (const auto* status = std::get_if<StatusMessage>(&event)) {
+            record(mlvcStarted ? phases.mlvc : phases.engine, status->message);
+        } else if (std::holds_alternative<InferenceBackendReady>(event)) {
+            // Blocking here pauses the start-up, so that the inference engine can release its temporary memory first
+            waitAfter(args.inferenceEngineWaitSeconds, phases.engine, "inference engine setup");
+            // The next status message starts the MLVC phase
+            mlvcStarted = true;
+        }
+    });
+    if (!managerResult) return managerResult.error();
+    std::optional<MlvcManager> manager = std::move(managerResult.value());
+    waitAfter(args.waitSeconds, phases.mlvc, "start-up");
+
     std::vector<MlvcAccessUnit> decoderInputAccessUnits;
     if (args.numDecoders > 0) {
+        record(phases.encode, "Pre-encoding decoder input");
         std::cerr << "Pre-encoding decoder input frames (qp=" << args.qp << ")...\n";
-        auto encoderConfig = manager.GetDefaultEncoderConfig(args.mlvcVersion);
+        auto encoderConfig = manager->GetDefaultEncoderConfig(args.mlvcVersion);
         if (!encoderConfig) {
             std::cerr << "Error: Failed to get default encoder config: " << encoderConfig.error().message() << '\n';
             return encoderConfig.error();
@@ -305,7 +349,7 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
         encoderConfig.value().SetSize(args.inputWidth, args.inputHeight);
         args.Apply(encoderConfig.value());
 
-        auto encoder = manager.CreateEncoder(encoderConfig.value());
+        auto encoder = manager->CreateEncoder(encoderConfig.value());
         if (!encoder) {
             std::cerr << "Error: Failed to create pre-encode encoder: " << encoder.error().message() << '\n';
             return encoder.error();
@@ -326,22 +370,27 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
         }
         std::cerr << "  " << decoderInputAccessUnits.size() << " access units pre-encoded.\n";
     }
+    // Wait outside the block above, so that the pre-encoding encoder is destroyed first
+    if (args.numDecoders > 0) {
+        waitAfter(args.waitSeconds, phases.encode, "pre-encoding decoder input");
+    }
 
-    StatsDump dump;
+    const auto statsDump = args.saveStats ? std::make_unique<StatsDump>() : nullptr;
     BenchmarkResults benchmarkResults;
 
+    record(phases.run, "Creating runners");
     std::atomic<bool> stopFlag = false;
     std::vector<std::unique_ptr<IBenchmarkRunner>> runners;
     for (int i = 0; i < args.numEncoders; i++) {
         const std::string name = "encoder_" + std::to_string(i);
-        auto runner =
-            std::make_unique<EncoderBenchmarkRunner>(name, args, manager, inputFrames, dump, benchmarkResults, stopFlag);
+        auto runner = std::make_unique<EncoderBenchmarkRunner>(name, args, *manager, inputFrames, statsDump.get(),
+                                                               benchmarkResults, stopFlag);
         runners.push_back(std::move(runner));
     }
     for (int i = 0; i < args.numDecoders; i++) {
         const std::string name = "decoder_" + std::to_string(i);
-        auto runner = std::make_unique<DecoderBenchmarkRunner>(name, args, manager, decoderInputAccessUnits, dump,
-                                                               benchmarkResults, stopFlag);
+        auto runner = std::make_unique<DecoderBenchmarkRunner>(name, args, *manager, decoderInputAccessUnits,
+                                                               statsDump.get(), benchmarkResults, stopFlag);
         runners.push_back(std::move(runner));
     }
 
@@ -352,11 +401,7 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
         }
     }
 
-    if (args.waitSeconds > 0) {
-        std::cerr << "Waiting " << args.waitSeconds << " seconds before running benchmark...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(args.waitSeconds));
-    }
-
+    record(phases.run, "Running runners");
     std::cerr << "Running benchmarks...\n";
     for (auto& runner : runners) {
         if (auto ret = runner->Run(); !ret) {
@@ -371,16 +416,23 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
 
     for (auto& runner : runners) {
         runner->Join();
-        runner.reset();
     }
+    record(phases.stop, "Destroying runners");
+    runners.clear();
+    waitAfter(args.waitSeconds, phases.stop, "destroying runners");
+    record(phases.exit, "Destroying manager");
+    manager.reset();
+    record(phases.exit, "Releasing input data");
+    inputFrames = {};
+    decoderInputAccessUnits = {};
+    if (metrics) metrics->Stop();
 
-    dump.Save((outputDir / "stats.json").string());
+    if (statsDump) statsDump->Save((outputDir / "stats.json").string());
 
     PrintBenchmarkSummary(benchmarkResults);
-
-    if (args.waitSeconds > 0) {
-        std::cerr << "Waiting " << args.waitSeconds << " seconds before exiting...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(args.waitSeconds));
+    if (metrics) {
+        PrintProfileSummary(metrics->AggregateByPhase());
+        PrintProfileSamples(metrics->Samples(), args.profileVerbose);
     }
     return {};
 }
@@ -551,35 +603,35 @@ int main(int argc, char** argv)
     if (cmd == "encode") {
         EncodeArguments args;
         if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
-            args.PrintHelp();
+            EncodeArguments{}.PrintHelp();
             return 1;
         }
         if (auto ret = RunEncode(args); !ret) return 1;
     } else if (cmd == "decode") {
         DecodeArguments args;
         if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
-            args.PrintHelp();
+            DecodeArguments{}.PrintHelp();
             return 1;
         }
         if (auto ret = RunDecode(args); !ret) return 1;
     } else if (cmd == "benchmark") {
         BenchmarkArguments args;
         if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
-            args.PrintHelp();
+            BenchmarkArguments{}.PrintHelp();
             return 1;
         }
         if (auto ret = RunBenchmark(args); !ret) return 1;
     } else if (cmd == "validate") {
         ValidationArguments args;
         if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
-            args.PrintHelp();
+            ValidationArguments{}.PrintHelp();
             return 1;
         }
         if (auto ret = RunValidation(args); !ret) return 1;
     } else if (cmd == "interop") {
         InteropArguments args;
         if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
-            args.PrintHelp();
+            InteropArguments{}.PrintHelp();
             return 1;
         }
         auto ret = RunInterop(args);

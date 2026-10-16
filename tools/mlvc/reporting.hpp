@@ -20,6 +20,8 @@ struct InteropResult;
 struct ValidationTestSummary;
 class BenchmarkResults;
 class Dataset;
+struct MetricsPhaseSummary;
+struct MetricsSample;
 
 // Utilities
 const char* ColorCode(const char* code);
@@ -40,6 +42,8 @@ void PrintInteropResult(const InteropResult& interopResult);
 void PrintInteropSummaryTable(const std::vector<InteropResult>& results);
 void PrintValidationResultsTable(const std::map<std::string, ValidationTestSummary>& summaries);
 void PrintBenchmarkSummary(const BenchmarkResults& results);
+void PrintProfileSummary(const std::vector<MetricsPhaseSummary>& phases);
+void PrintProfileSamples(const std::vector<MetricsSample>& samples, bool includePeriodic);
 
 // CLI
 void PrintHelp();

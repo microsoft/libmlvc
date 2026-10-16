@@ -7,6 +7,9 @@
 
 #include <libmlvc/error_codes.hpp>
 
+#include <algorithm>
+#include <array>
+#include <fstream>
 #include <string_view>
 
 namespace libmlvc {
@@ -135,6 +138,74 @@ expected<std::unordered_map<std::string, std::span<const std::byte>>> ExtractTar
         }
     }
     return res;
+}
+
+expected<std::vector<std::byte>> ReadTarEntry(const std::filesystem::path& archivePath, std::string_view entryName)
+{
+    static constexpr size_t blockSize = 512;
+
+    std::ifstream file(archivePath, std::ios::binary);
+    if (!file) {
+        MLVC_LOG_ERROR("Failed to open tar archive: %s", archivePath.filename().string().c_str());
+        return make_error_code(Error::io_error);
+    }
+
+    std::error_code ec;
+    const auto archiveSize = std::filesystem::file_size(archivePath, ec);
+    if (ec) {
+        MLVC_LOG_ERROR("Failed to get size of tar archive %s: %s", archivePath.filename().string().c_str(),
+                       ec.message().c_str());
+        return make_error_code(Error::io_error);
+    }
+
+    std::array<std::byte, blockSize> header{};
+    std::uintmax_t offset{};
+    while (file.read(reinterpret_cast<char*>(header.data()), header.size())) {
+        offset += blockSize;
+        if (std::ranges::all_of(header, [](std::byte value) { return value == std::byte{}; })) {
+            break;  // end of archive
+        }
+
+        const TarHeader headerView(header);
+        auto name = headerView.GetFileName();
+        if (!name) {
+            return name.error();
+        }
+
+        const auto fileType = headerView.GetFileType();
+        if (!fileType) {
+            return fileType.error();
+        }
+
+        if (fileType.value() != TarFileType::File) {
+            continue;  // non-regular files have no data blocks
+        }
+
+        auto fsize = headerView.GetFileSize();
+        if (!fsize) {
+            return fsize.error();
+        }
+        const size_t paddedSize = ((fsize.value() + blockSize - 1) / blockSize) * blockSize;
+        if (paddedSize > archiveSize - offset) {
+            MLVC_LOG_ERROR("Invalid tar header: file size exceeds archive size");
+            return make_error_code(Error::general_failure);
+        }
+
+        if (name.value() == entryName) {
+            std::vector<std::byte> fileData(fsize.value());
+            if (!file.read(reinterpret_cast<char*>(fileData.data()), static_cast<std::streamsize>(fileData.size()))) {
+                MLVC_LOG_ERROR("Invalid tar header: file size exceeds archive size");
+                return make_error_code(Error::general_failure);
+            }
+            return fileData;
+        }
+        file.seekg(static_cast<std::streamoff>(paddedSize), std::ios::cur);
+        offset += paddedSize;
+    }
+
+    MLVC_LOG_ERROR("%.*s not found in tar archive %s", static_cast<int>(entryName.size()), entryName.data(),
+                   archivePath.filename().string().c_str());
+    return make_error_code(Error::io_error);
 }
 
 }  // namespace libmlvc

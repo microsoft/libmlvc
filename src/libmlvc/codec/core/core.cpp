@@ -33,6 +33,12 @@ expected<void> MlvcCodecCoreCommon::Initialize()
     return {};
 }
 
+expected<void> MlvcCodecCoreCommon::ValidateModelImageTensor(const Tensor<mlvc_f16_t, 3>& image) const
+{
+    return ValidateImageTensor(m_modelMetadata->imageLayout, m_modelMetadata->modelWidth, m_modelMetadata->modelHeight,
+                               image.Shape(), image.Strides());
+}
+
 expected<int> MlvcCodecCoreCommon::MapQpToQIndex(const int qp) const
 {
     if (qp < MIN_QP || qp > MAX_QP) {
@@ -91,6 +97,7 @@ MlvcEncoderCore::MlvcEncoderCore(const MlvcVersion mlvcVersion, const EncoderCon
     , m_gop{ m_config }
     , m_inputs{ session }
     , m_outputs{ session }
+    , m_inputTransformer{ modelMetadata ? modelMetadata->imageLayout : TensorLayout::NCHW }
     , m_gaussianEncoder{ gaussianPmf }
     , m_bitEstimatorZ{ bitEstimatorPmf }
 {
@@ -112,6 +119,7 @@ expected<void> MlvcEncoderCore::Initialize()
     if (auto ret = m_ref.Initialize(); !ret) return ret.error();
     if (auto ret = m_inputs.Initialize(); !ret) return ret.error();
     if (auto ret = m_outputs.Initialize(); !ret) return ret.error();
+    if (auto ret = ValidateModelImageTensor(m_inputs.x); !ret) return ret.error();
     if (auto ret = m_gaussianEncoder.Initialize(); !ret) return ret.error();
     if (auto ret = m_bitEstimatorZ.Initialize(); !ret) return ret.error();
 
@@ -296,6 +304,7 @@ MlvcDecoderCore::MlvcDecoderCore(const MlvcVersion mlvcVersion, const int displa
     , m_outputs{ session }
     , m_gaussianDecoder{ gaussianPmf }
     , m_bitEstimatorZ{ bitEstimatorPmf }
+    , m_outputTransformer{ modelMetadata ? modelMetadata->imageLayout : TensorLayout::NCHW }
 {
 }
 
@@ -315,7 +324,7 @@ expected<void> MlvcDecoderCore::Initialize()
     if (auto ret = m_ref.Initialize(); !ret) return ret.error();
     if (auto ret = m_inputs.Initialize(); !ret) return ret.error();
     if (auto ret = m_outputs.Initialize(); !ret) return ret.error();
-    if (auto res = m_outputTransformer.Initialize(); !res) return res.error();
+    if (auto ret = ValidateModelImageTensor(m_outputs.xHat); !ret) return ret.error();
     if (auto err = m_stream.Initialize(rans::RansVariant::RansByte); err) {
         MLVC_LOG_ERROR("Failed to initialize RANS decoder stream: %s", err.message().c_str());
         return make_error_code(Error::entropy_coder_init_error);
