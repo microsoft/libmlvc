@@ -27,13 +27,13 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
 
 class ModelBundle {
 public:
-    ModelBundle(std::span<const std::byte> bundleBlob, IInferenceEngine& engine, bool enableModelCache,
-                bool enableSessionCaching);
+    ModelBundle(IInferenceEngine& engine, bool enableModelCache, bool enableSessionPreloading);
     ModelBundle(const ModelBundle&) = delete;
     ModelBundle& operator=(const ModelBundle&) = delete;
     ModelBundle(ModelBundle&&) = default;
     ModelBundle& operator=(ModelBundle&&) = delete;
-    expected<void> Initialize(CancelToken cancelToken, const InitializeProgressCallback& progressCallback);
+    expected<void> Initialize(std::span<const std::byte> bundleBlob, CancelToken cancelToken,
+                              const InitializeProgressCallback& progressCallback);
 
     // Manifest, capabilities and encoder config
     const BundleManifest& GetManifest() const { return m_manifest; }
@@ -50,21 +50,35 @@ public:
     expected<InferenceSessionPtr> GetInferenceSession(const std::string& modelId, ModelPartId partId) const;
 
 private:
+    using BundleFiles = std::unordered_map<std::string, std::span<const std::byte>>;
+
+    struct ModelSource {
+        std::span<const std::byte> modelData;
+        std::map<std::string, std::span<const std::byte>> weightsData;
+        std::string cacheKey;
+    };
+
     std::vector<std::byte> m_bundleBlob;
     IInferenceEngine& m_engine;
     bool m_enableModelCache{};
-    bool m_enableSessionCaching{};
+    bool m_enableSessionPreloading{};
     BundleManifest m_manifest{};
-    std::unordered_map<std::string, std::span<const std::byte>> m_bundleFiles;
+    BundleFiles m_bundleFiles;
     std::unordered_map<std::string, std::shared_ptr<const GaussianCoderPmf>> m_gaussianPmfs;
     std::unordered_map<std::string, std::shared_ptr<const BitEstimatorPmf>> m_bitEstimatorPmfs;
     std::unordered_map<std::string, std::shared_ptr<const ScaleDecoderData>> m_scaleDecoderData;
     std::map<std::pair<std::string, ModelPartId>, InferenceSessionPtr> m_inferenceSessions;
 
-    expected<void> LoadScaleDecoderData();
-    expected<void> LoadPmfs();
-    expected<void> CacheSessions(CancelToken cancelToken, const InitializeProgressCallback& progressCallback);
-    expected<InferenceSessionPtr> CreateInferenceSession(const std::string& modelId, ModelPartId partId) const;
+    expected<void> LoadScaleDecoderData(const BundleFiles& files);
+    expected<void> LoadPmfs(const BundleFiles& files);
+    expected<bool> PrepareModelCache(const BundleFiles& files, CancelToken cancelToken,
+                                     const InitializeProgressCallback& progressCallback);
+    expected<void> PreloadSessions(const BundleFiles& files, CancelToken cancelToken,
+                                   const InitializeProgressCallback& progressCallback);
+    expected<ModelSource> GetModelSource(const std::string& modelId, const ModelPartManifest& part,
+                                         const BundleFiles& files) const;
+    expected<InferenceSessionPtr> CreateInferenceSession(const std::string& modelId, ModelPartId partId,
+                                                         const BundleFiles& files) const;
 };
 
 }  // namespace libmlvc

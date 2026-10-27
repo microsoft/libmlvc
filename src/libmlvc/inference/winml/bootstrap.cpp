@@ -538,19 +538,28 @@ static expected<void> ResolveWinMlApiFunctions(HMODULE hWinML, WinMlApi& outApi)
     return {};
 }
 
-expected<LoadedWinMlModules> LoadWinMlModules(WinMlInitMode mode)
+expected<LoadedWinMlModules> LoadWinMlModules(WinMlInitMode mode, const InitializeProgressCallback& progressCallback)
 {
+    if (progressCallback && mode == WinMlInitMode::AppSdk) {
+        progressCallback(StatusMessage{ "Attaching Windows App Runtime" });
+    }
     auto dirResult = ResolveDllDir(mode);
     if (!dirResult) {
         return make_unexpected(dirResult.error());
     }
     const std::wstring& dir = *dirResult;
 
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Loading ONNX Runtime" });
+    }
     auto hOnnxRuntime = LoadDllFromDir(dir, kOnnxRuntimeDllName);
     if (!hOnnxRuntime) {
         return make_unexpected(hOnnxRuntime.error());
     }
 
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Loading Windows ML" });
+    }
     auto hWinML = LoadDllFromDir(dir, kWinMLDllName);
     if (!hWinML) {
         return make_unexpected(hWinML.error());
@@ -743,10 +752,9 @@ static expected<void> EnsureProviderReadyAsync(const WinMlApi& winMl, WinMLEpHan
 
 }  // anonymous namespace
 
-expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const WinMlApi& winMl, const OrtApi* ortApi,
-                                                                          OrtEnv* ortEnv, OnnxExecutionProvider provider,
-                                                                          CancelToken cancelToken,
-                                                                          DownloadProgressCallback progressCallback)
+expected<EnsureExecutionProviderReadyResult>
+EnsureExecutionProviderReady(const WinMlApi& winMl, const OrtApi* ortApi, OrtEnv* ortEnv, OnnxExecutionProvider provider,
+                             CancelToken cancelToken, const InitializeProgressCallback& progressCallback)
 {
     const char* providerName = OnnxExecutionProviderToOrtName(provider);
     const char* providerLogName = providerName ? providerName : OnnxExecutionProviderToString(provider);
@@ -801,9 +809,14 @@ expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const 
             MLVC_LOG_INFO("Ensuring execution provider '%s' is ready (current ReadyState=%s)", providerLogName,
                           ReadyStateToString(readyState));
             const bool wasDownload = (readyState == WinMLEpReadyState_NotPresent);
+            const DownloadProgressCallback reportProgress = [&progressCallback, wasDownload](double progress) {
+                if (progressCallback) {
+                    progressCallback(StatusMessage{ std::string(wasDownload ? "Downloading" : "Attaching") + " execution provider: "
+                                                    + std::to_string(static_cast<int>(progress)) + "%" });
+                }
+            };
             const auto startTime = std::chrono::steady_clock::now();
-            if (auto ret =
-                    EnsureProviderReadyAsync(winMl, epRaw, providerLogName, readyState, cancelToken, progressCallback);
+            if (auto ret = EnsureProviderReadyAsync(winMl, epRaw, providerLogName, readyState, cancelToken, reportProgress);
                 !ret) {
                 return make_unexpected(ret.error());
             }
@@ -814,11 +827,16 @@ expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const 
             }
         } else {
             MLVC_LOG_DEBUG("Execution provider '%s' is already ready", providerLogName);
-            if (progressCallback) progressCallback(100.0);
         }
     }
 
     // Register the provider with onnxruntime via OrtApi::RegisterExecutionProviderLibrary
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Registering execution provider" });
+    }
+    if (cancelToken.IsCancelled()) {
+        return make_unexpected(make_error_code(Error::operation_cancelled));
+    }
     std::string epPackageVersion;
     {
         WinMLEpHandle epRaw = nullptr;

@@ -24,11 +24,15 @@ if(NOT BUILD_SHARED_LIBS)
         support/rans_test_pmf.hpp
         unit/test_bit_io.cpp
         unit/test_bitstream_spec_v0.cpp
+        unit/test_bundle.cpp
+        unit/test_frame_processing.cpp
         unit/test_gop_manager.cpp
+        unit/test_inference_engine.cpp
         unit/test_model_cache.cpp
         unit/test_rans_coder.cpp
         unit/test_ref_manager.cpp
         unit/test_scale_decoder.cpp
+        unit/test_tar.cpp
         unit/test_transforms.cpp
         unit/test_utils.cpp
         integration/test_bitexact.cpp

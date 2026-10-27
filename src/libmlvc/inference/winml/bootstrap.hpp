@@ -78,7 +78,7 @@ struct LoadedWinMlModules {
 // Vendor execution providers (OpenVINO, QNN, TensorRT) work in both modes -- the flat-C
 // WinMLEpCatalog API exposed by the WinML DLL handles their discovery and download regardless
 // of whether the WindowsAppRuntime has been bootstrapped.
-expected<LoadedWinMlModules> LoadWinMlModules(WinMlInitMode mode);
+expected<LoadedWinMlModules> LoadWinMlModules(WinMlInitMode mode, const InitializeProgressCallback& progressCallback);
 
 // Returns the deployed WindowsAppRuntime framework version (e.g. "1.8.260222000") in AppSdk mode,
 // or an empty string in SelfContained mode (no framework package present).
@@ -90,10 +90,9 @@ expected<const OrtApiBase*> GetOrtApiBaseFromModule(HMODULE hOnnxRuntime);
 // singleton OrtEnv.
 // Returns the EP package version and, when the package had to be downloaded, the measured
 // download duration.
-expected<EnsureExecutionProviderReadyResult> EnsureExecutionProviderReady(const WinMlApi& winMl, const OrtApi* ortApi,
-                                                                          OrtEnv* ortEnv, OnnxExecutionProvider provider,
-                                                                          CancelToken cancelToken,
-                                                                          DownloadProgressCallback progressCallback);
+expected<EnsureExecutionProviderReadyResult>
+EnsureExecutionProviderReady(const WinMlApi& winMl, const OrtApi* ortApi, OrtEnv* ortEnv, OnnxExecutionProvider provider,
+                             CancelToken cancelToken, const InitializeProgressCallback& progressCallback);
 
 const char* OnnxExecutionProviderToOrtName(const OnnxExecutionProvider onnxExecutionProvider);
 

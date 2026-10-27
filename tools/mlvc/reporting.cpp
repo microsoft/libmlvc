@@ -3,6 +3,7 @@
 
 #include "reporting.hpp"
 #include "benchmark_runner.hpp"
+#include "metrics_collector.hpp"
 
 #include "libmlvc_support/dataset.hpp"
 #include "libmlvc_support/interop.hpp"
@@ -12,12 +13,16 @@
 #include <libmlvc/types.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <string_view>
 #include <tuple>
@@ -51,12 +56,72 @@ std::string FormatCell(const OpTimerStats& s, int width, int precision = 1)
     return str;
 }
 
+std::string FormatValue(double value, int precision, bool showSign)
+{
+    if (std::isnan(value)) return "-";
+    if (std::round(value * std::pow(10.0, precision)) == 0.0) {
+        value = 0.0;  // Print values that round to zero without a sign
+        showSign = false;
+    }
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(precision) << (showSign ? std::showpos : std::noshowpos) << value;
+    return ss.str();
+}
+
+double SecondsBetween(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to)
+{
+    return std::chrono::duration<double>(to - from).count();
+}
+
+struct TableColumn {
+    const char* name;
+    const char* unit;  // Printed on a second header line, under the name
+    int width;
+    bool alignLeft = false;
+};
+
+std::string TableSeparator(std::span<const TableColumn> columns)
+{
+    std::string separator;
+    for (const auto& column : columns) {
+        separator += "+" + std::string(column.width, '-');
+    }
+    return separator + "+\n";
+}
+
+void PrintTableHeader(std::span<const TableColumn> columns)
+{
+    const auto separator = TableSeparator(columns);
+    const auto printLine = [&](auto label) {
+        for (const auto& column : columns) {
+            std::cerr << "| " << (column.alignLeft ? std::left : std::right) << std::setw(column.width - 2)
+                      << label(column) << ' ';
+        }
+        std::cerr << "|\n";
+    };
+    std::cerr << separator;
+    printLine([](const TableColumn& column) { return column.name; });
+    if (std::ranges::any_of(columns, [](const TableColumn& column) { return *column.unit != '\0'; })) {
+        printLine([](const TableColumn& column) { return column.unit; });
+    }
+    std::cerr << separator;
+}
+
+void PrintTableRow(std::span<const TableColumn> columns, std::span<const std::string> cells)
+{
+    for (size_t i = 0; i < columns.size(); ++i) {
+        std::cerr << "| " << (columns[i].alignLeft ? std::left : std::right) << std::setw(columns[i].width - 2)
+                  << cells[i] << ' ';
+    }
+    std::cerr << "|\n";
+}
+
 template <typename StatsType>
 void PrintBenchmarkTable(
     const char* label, const std::map<std::string, StatsType>& statsMap,
     const std::vector<std::tuple<const char*, std::function<const OpTimerStats&(const StatsType&)>, int>>& timerCols,
-    std::function<int(const StatsType&)> reconfCountGetter, std::function<int(const StatsType&)> totalCountGetter,
-    const std::map<std::string, double>& avgFpsMap)
+    std::function<int(const StatsType&)> reconfCountGetter,
+    std::function<const OpTimerStats&(const StatsType&)> totalGetter, const std::map<std::string, double>& avgFpsMap)
 {
     if (statsMap.empty()) return;
 
@@ -65,6 +130,7 @@ void PrintBenchmarkTable(
     const int countW = 11;
     const int timerW = 12;
     const int fpsW = 8;
+    const int firstW = 8;
 
     // Build separator
     std::ostringstream sepSs;
@@ -72,10 +138,10 @@ void PrintBenchmarkTable(
     sepSs << "+" << std::string(countW, '-');
     for (size_t i = 0; i < timerCols.size(); i++)
         sepSs << "+" << std::string(timerW, '-');
-    sepSs << "+" << std::string(fpsW, '-') << "+\n";
+    sepSs << "+" << std::string(fpsW, '-') << "+" << std::string(firstW, '-') << "+\n";
     const auto sep = sepSs.str();
 
-    std::cerr << label << " (ms, mean/std, count=reconfigurations/frames):\n";
+    std::cerr << label << " (ms, mean/std, count=reconfigurations/frames, First=first frame incl. setup):\n";
     std::cerr << sep;
 
     // Header
@@ -84,14 +150,14 @@ void PrintBenchmarkTable(
     for (const auto& [name, getter, prec] : timerCols) {
         std::cerr << "| " << std::setw(timerW - 1) << name;
     }
-    std::cerr << "| " << std::setw(fpsW - 1) << "FPS" << "|\n";
+    std::cerr << "| " << std::setw(fpsW - 1) << "FPS" << "| " << std::setw(firstW - 1) << "First" << "|\n";
     std::cerr << sep;
 
     // Rows
     for (const auto& [streamName, s] : statsMap) {
         // Count column: reconf/total
         std::ostringstream countSs;
-        countSs << reconfCountGetter(s) << "/" << totalCountGetter(s);
+        countSs << reconfCountGetter(s) << "/" << totalGetter(s).Count();
         std::cerr << "| " << std::left << std::setw(streamW - 1) << streamName;
         std::cerr << "| " << std::right << std::setw(countW - 2) << countSs.str() << " ";
         for (const auto& [name, getter, prec] : timerCols) {
@@ -99,7 +165,8 @@ void PrintBenchmarkTable(
         }
         const auto it = avgFpsMap.find(streamName);
         const double avgFps = it != avgFpsMap.end() ? it->second : 0.0;
-        std::cerr << "| " << std::right << std::fixed << std::setprecision(1) << std::setw(fpsW - 2) << avgFps << " |\n";
+        std::cerr << "| " << std::right << std::fixed << std::setprecision(1) << std::setw(fpsW - 2) << avgFps << " ";
+        std::cerr << "| " << std::setw(firstW - 2) << totalGetter(s).FirstMs() << " |\n";
     }
     std::cerr << sep;
 }
@@ -174,10 +241,11 @@ void PrintManagerInfo(const ManagerInfo& config)
         std::cerr << "/" << OnnxExecutionProviderToString(config.onnxExecutionProvider);
     }
     std::cerr << "/" << ComputeUnitToString(config.computeUnit);
-    if (config.enableModelCache || config.enableSessionCaching) {
-        std::cerr << ", cache=" << (config.enableModelCache ? "model" : "")
-                  << (config.enableModelCache && config.enableSessionCaching ? "+" : "")
-                  << (config.enableSessionCaching ? "session" : "");
+    if (config.enableModelCache) {
+        std::cerr << ", model_cache";
+    }
+    if (config.enableSessionPreloading) {
+        std::cerr << ", session_preloading";
     }
     if (config.inferenceBackend == InferenceBackend::WINDOWSML) {
         if (!config.windowsAppRuntimeVersion.empty()) {
@@ -486,7 +554,7 @@ void PrintBenchmarkSummary(const BenchmarkResults& results)
         };
         PrintBenchmarkTable<EncoderStats>(
             "Encoders", results.GetEncoderStats(), cols, [](const EncoderStats& s) { return s.reconfigure.Count(); },
-            [](const EncoderStats& s) { return s.total.Count(); }, avgFpsMap);
+            [](S s) -> const OpTimerStats& { return s.total; }, avgFpsMap);
     }
 
     // Decoder table
@@ -502,8 +570,105 @@ void PrintBenchmarkSummary(const BenchmarkResults& results)
         };
         PrintBenchmarkTable<DecoderStats>(
             "Decoders", results.GetDecoderStats(), cols, [](const DecoderStats& s) { return s.reconfigure.Count(); },
-            [](const DecoderStats& s) { return s.total.Count(); }, avgFpsMap);
+            [](S s) -> const OpTimerStats& { return s.total; }, avgFpsMap);
     }
+}
+
+void PrintProfileSummary(const std::vector<MetricsPhaseSummary>& phases)
+{
+    size_t phaseWidth = std::string_view("Phase").size();
+    for (const auto& phase : phases)
+        phaseWidth = std::max(phaseWidth, phase.phase.size());
+
+    const std::array<TableColumn, 7> columns{ {
+        { "Phase", "", static_cast<int>(phaseWidth) + 2, true },
+        { "Time", "(s)", 9 },
+        { "CPU time", "(s)", 10 },
+        { "CPU", "(%)", 9 },
+        { "Commit", "(MB)", 9 },
+        { "Shared", "(MB)", 9 },
+        { "Resident", "(MB)", 10 },
+    } };
+
+    std::cerr << "\nProfile by phase (time and CPU exclude waits, CPU use as a percentage of one core):\n";
+    PrintTableHeader(columns);
+    for (const auto& phase : phases) {
+        // CPU time advances in ticks (about 16 ms on Windows), too coarse for shorter phases
+        const auto cpuPercent = phase.seconds >= 0.1 ? FormatValue(100.0 * phase.cpuSeconds / phase.seconds, 1, false) : "-";
+        PrintTableRow(columns, std::array<std::string, 7>{
+                                   phase.phase,
+                                   FormatValue(phase.seconds, 3, false),
+                                   FormatValue(phase.cpuSeconds, 3, false),
+                                   cpuPercent,
+                                   FormatValue(phase.commitMb, 1, true),
+                                   FormatValue(phase.sharedCommitMb, 1, true),
+                                   FormatValue(phase.workingSetMb, 1, true),
+                               });
+    }
+    std::cerr << TableSeparator(columns);
+}
+
+void PrintProfileSamples(const std::vector<MetricsSample>& samples, bool includePeriodic)
+{
+    constexpr std::string_view endEvent = "End of profiling";
+    std::vector<const MetricsSample*> rows;
+    size_t phaseWidth = std::string_view("Phase").size();
+    size_t eventWidth = endEvent.size();
+    for (const auto& sample : samples) {
+        if (includePeriodic || !sample.phase.empty() || &sample == &samples.back()) {
+            rows.push_back(&sample);
+            phaseWidth = std::max(phaseWidth, sample.phase.size());
+            eventWidth = std::max(eventWidth, sample.event.size());
+        }
+    }
+
+    const std::array<TableColumn, 12> columns{ {
+        { "Phase", "", static_cast<int>(phaseWidth) + 2, true },
+        { "Event", "", static_cast<int>(eventWidth) + 2, true },
+        { "Elapsed", "(s)", 9 },
+        { "CPU", "(s)", 9 },
+        { "Commit", "(MB)", 9 },
+        { "Shared", "(MB)", 9 },
+        { "Resident", "(MB)", 10 },
+        { "+Time", "(s)", 9 },
+        { "+CPU", "(s)", 9 },
+        { "+Commit", "(MB)", 9 },
+        { "+Shared", "(MB)", 9 },
+        { "+Resident", "(MB)", 11 },
+    } };
+
+    std::cerr << "\nProfile samples (elapsed time, collected CPU time and memory, and changes until the next row):\n";
+    PrintTableHeader(columns);
+    std::string phase;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& metrics = rows[i]->metrics;
+        // Show each phase name only on its first row
+        const bool newPhase = !rows[i]->phase.empty() && rows[i]->phase != phase;
+        if (newPhase) {
+            if (!phase.empty()) std::cerr << TableSeparator(columns);
+            phase = rows[i]->phase;
+        }
+        const bool last = i + 1 == rows.size();
+        std::array<std::string, 12> cells{
+            newPhase ? phase : "",
+            last && rows[i]->event.empty() ? std::string(endEvent) : rows[i]->event,
+            FormatValue(SecondsBetween(samples.front().metrics.time, metrics.time), 3, false),
+            FormatValue(metrics.cpuSeconds, 3, false),
+            FormatValue(metrics.commitMb, 1, false),
+            FormatValue(metrics.sharedCommitMb, 1, false),
+            FormatValue(metrics.workingSetMb, 1, false),
+        };
+        if (!last) {
+            const auto& next = rows[i + 1]->metrics;
+            cells[7] = FormatValue(SecondsBetween(metrics.time, next.time), 3, true);
+            cells[8] = FormatValue(next.cpuSeconds - metrics.cpuSeconds, 3, true);
+            cells[9] = FormatValue(next.commitMb - metrics.commitMb, 1, true);
+            cells[10] = FormatValue(next.sharedCommitMb - metrics.sharedCommitMb, 1, true);
+            cells[11] = FormatValue(next.workingSetMb - metrics.workingSetMb, 1, true);
+        }
+        PrintTableRow(columns, cells);
+    }
+    std::cerr << TableSeparator(columns);
 }
 
 void PrintHelp()

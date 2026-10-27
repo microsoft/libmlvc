@@ -18,10 +18,10 @@ class ValidationTests : public ::testing::Test {
 protected:
     void SetUp() override
     {
-        // To speed up tests, disable session caching
+        // To speed up tests, disable session preloading
         ManagerParams managerParams;
         managerParams.computeUnit = GetTestConfig().computeUnit;
-        managerParams.enableSessionCaching = false;
+        managerParams.enableSessionPreloading = false;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
 
         auto manager =

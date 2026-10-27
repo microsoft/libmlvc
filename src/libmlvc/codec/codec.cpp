@@ -414,8 +414,8 @@ expected<void> MlvcEncoderImpl::ValidateInputFrame(const Nv12FrameView& frame) c
         return make_error_code(Error::invalid_argument);
     }
 
-    if (frame.Stride() < frame.Width()) {
-        MLVC_LOG_ERROR("Invalid input frame stride: %d (expected >= %d)", frame.Stride(), frame.Width());
+    if (frame.Stride() < frame.Width() || frame.Stride() % 2 != 0) {
+        MLVC_LOG_ERROR("Invalid input frame stride: %d (expected even and >= %d)", frame.Stride(), frame.Width());
         return make_error_code(Error::invalid_argument);
     }
 

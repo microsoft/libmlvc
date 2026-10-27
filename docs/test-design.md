@@ -5,7 +5,7 @@ see the root [README](../README.md).
 
 ## Unit tests
 
-Lower-level unit tests (`test/unit/`) cover individual components in isolation: bitstream bit I/O (`test_bit_io`), GOP and reference management (`test_gop_manager`, `test_ref_manager`), the rANS entropy coder (`test_rans_coder`), scale decoding (`test_scale_decoder`), NV12 and color transforms (`test_transforms`), the model cache (`test_model_cache`), and utility helpers (`test_utils`). The bitstream spec conformance suite (`test_bitstream_spec_v0`) also lives here but is covered in its own section below.
+Lower-level unit tests (`test/unit/`) cover individual components in isolation: bitstream bit I/O (`test_bit_io`), GOP and reference management (`test_gop_manager`, `test_ref_manager`), the rANS entropy coder (`test_rans_coder`), scale decoding (`test_scale_decoder`), NV12 and color transforms (`test_transforms`), model image pre/post-processing and image tensor validation (`test_frame_processing`), the model cache (`test_model_cache`), and utility helpers (`test_utils`). The bitstream spec conformance suite (`test_bitstream_spec_v0`) also lives here but is covered in its own section below.
 
 
 ## Bitstream spec conformance tests
@@ -86,6 +86,7 @@ Error handling scenarios:
 | Decoder_CorruptedPayload | Valid header, corrupted entropy data | Returns recoverable error, decoder remains usable |
 | Decoder_RecoveryAfterError | Error → IDR frame | Decoder recovers and continues normally |
 | Encoder_InvalidResolution | Resolution exceeding capabilities | Returns error, encoder remains usable |
+| Encoder_InvalidStride | NV12 stride smaller than the width or odd | Returns error, encoder remains usable |
 | Encoder_InvalidQp | QP outside 0-51 range | Returns error, encoder remains usable |
 | Encoder_InvalidLtrSlot | `useLtrSlotIdx` for empty slot | Stale hint ignored (encodes normal P-frame), encoder remains usable |
 

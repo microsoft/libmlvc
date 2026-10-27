@@ -533,9 +533,9 @@ class CodecFeatureTests : public ::testing::Test {
 protected:
     CodecFeatureTests()
     {
-        // To speed up tests, disable session caching
+        // To speed up tests, disable session preloading
         m_managerParams.computeUnit = GetTestConfig().computeUnit;
-        m_managerParams.enableSessionCaching = false;
+        m_managerParams.enableSessionPreloading = false;
         m_managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
     }
 
@@ -1198,6 +1198,31 @@ TEST_F(CodecFeatureTests, Encoder_InvalidResolution)
     for (const auto& frame : { MakeDummyFrame(320, 180), MakeDummyFrame(DEFAULT_WIDTH, 358), MakeDummyFrame(2000, 2000) }) {
         auto result = encoder->Encode(frame.View(), {});
         ASSERT_FALSE(result) << "Mismatched frame dimensions should be rejected";
+        EXPECT_EQ(result.error(), make_error_code(Error::invalid_argument));
+    }
+    EXPECT_EQ(encoder->GetStats().numFramesAttempted, 0);
+
+    // Encoder should remain usable
+    auto validFrame = MakeDummyFrame();
+    auto validResult = encoder->Encode(validFrame.View(), {});
+    EXPECT_TRUE(validResult) << "Encoder should remain usable: " << validResult.error().message();
+}
+
+TEST_F(CodecFeatureTests, Encoder_InvalidStride)
+{
+    auto manager = CreateManager();
+    ASSERT_TRUE(manager);
+
+    std::optional<MlvcEncoder> encoder;
+    ASSERT_NO_FATAL_FAILURE(SetupEncoder(*manager, encoder));
+
+    for (const int stride : { DEFAULT_WIDTH - 2, DEFAULT_WIDTH + 1 }) {
+        SCOPED_TRACE(stride);
+        const std::vector<std::byte> buffer(static_cast<size_t>(stride) * DEFAULT_HEIGHT * 3 / 2);
+        const Nv12FrameView frame{ DEFAULT_WIDTH, DEFAULT_HEIGHT, stride, buffer.data(),
+                                   buffer.data() + static_cast<size_t>(stride) * DEFAULT_HEIGHT };
+        auto result = encoder->Encode(frame, {});
+        ASSERT_FALSE(result) << "Invalid stride should be rejected";
         EXPECT_EQ(result.error(), make_error_code(Error::invalid_argument));
     }
     EXPECT_EQ(encoder->GetStats().numFramesAttempted, 0);

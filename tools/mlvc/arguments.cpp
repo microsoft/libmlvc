@@ -64,12 +64,16 @@ expected<int> CommonArguments::Parse(std::span<std::string_view> args)
         auto ret = ParseValue(args.subspan(1), computeUnit);
         if (!ret) return ret.error();
         return 1 + ret.value();
+    } else if (args[0] == "--cache-dir") {
+        auto ret = ParseValue(args.subspan(1), cacheDir);
+        if (!ret) return ret.error();
+        return 1 + ret.value();
     } else if (args[0] == "--enable-model-cache") {
         auto ret = ParseValue(args.subspan(1), enableModelCache);
         if (!ret) return ret.error();
         return 1 + ret.value();
-    } else if (args[0] == "--enable-session-caching") {
-        auto ret = ParseValue(args.subspan(1), enableSessionCaching);
+    } else if (args[0] == "--enable-session-preloading") {
+        auto ret = ParseValue(args.subspan(1), enableSessionPreloading);
         if (!ret) return ret.error();
         return 1 + ret.value();
     } else if (args[0] == "--winml-init") {
@@ -107,8 +111,11 @@ void CommonArguments::PrintHelpImpl()
     std::cerr << "  --mlvc-version                  Specify the MLVC version (default: " << mlvcVersion.ToString() << ")\n";
     std::cerr << "  --compute-unit                  Specify the compute unit auto, cpu, gpu, npu (default: "
               << ComputeUnitToString(computeUnit) << ")\n";
+    std::cerr << "  --cache-dir                     Root cache directory (default: mlvc_cache in the platform app data "
+                 "directory)\n";
     std::cerr << "  --enable-model-cache            Enable model cache (default: " << enableModelCache << ")\n";
-    std::cerr << "  --enable-session-caching        Enable session caching (default: " << enableSessionCaching << ")\n";
+    std::cerr << "  --enable-session-preloading     Preload inference sessions (default: " << enableSessionPreloading
+              << ")\n";
     std::cerr << "  --winml-init                    WinML init mode: appsdk, self-contained (default: "
               << WinMlInitModeToString(winmlInitMode) << ")\n";
     std::cerr
@@ -463,20 +470,25 @@ void BenchmarkArguments::Save(const std::filesystem::path& filename) const
     root["model_bundles_dir"] = modelBundlesDir.string();
     root["mlvc_version"] = mlvcVersion.ToString();
     root["compute_unit"] = ComputeUnitToString(computeUnit);
+    root["cache_dir"] = cacheDir.string();
     root["enable_model_cache"] = enableModelCache;
-    root["enable_session_caching"] = enableSessionCaching;
+    root["enable_session_preloading"] = enableSessionPreloading;
     root["input_file"] = inputFile.string();
     root["image_width"] = inputWidth;
     root["image_height"] = inputHeight;
     root["output_directory"] = outputDirectory.string();
+    root["save_stats"] = saveStats;
     root["num_encoders"] = numEncoders;
     root["num_decoders"] = numDecoders;
     root["target_fps"] = targetFps;
     root["duration_seconds"] = durationSeconds;
     root["num_iterations"] = numIterations;
-    root["strict_fps_target"] = strictFpsTarget;
     root["wait_seconds"] = waitSeconds;
+    root["inference_engine_wait_seconds"] = inferenceEngineWaitSeconds;
     root["qp"] = qp;
+    root["profile"] = profile;
+    root["profile_interval_ms"] = profileIntervalMs;
+    root["profile_verbose"] = profileVerbose;
 
     const std::string jsonString = boost::json::serialize(root);
     std::ofstream file{ filename };
@@ -505,6 +517,9 @@ expected<int> BenchmarkArguments::Parse(std::span<std::string_view> args)
         auto ret = ParseValue(args.subspan(1), outputDirectory);
         if (!ret) return ret.error();
         return 1 + ret.value();
+    } else if (args[0] == "--save-stats") {
+        saveStats = true;
+        return 1;
     } else if (args[0] == "--num-encoders") {
         auto ret = ParseValue(args.subspan(1), numEncoders);
         if (!ret) return ret.error();
@@ -525,18 +540,29 @@ expected<int> BenchmarkArguments::Parse(std::span<std::string_view> args)
         auto ret = ParseValue(args.subspan(1), numIterations);
         if (!ret) return ret.error();
         return 1 + ret.value();
-    } else if (args[0] == "--strict-fps-target") {
-        auto ret = ParseValue(args.subspan(1), strictFpsTarget);
-        if (!ret) return ret.error();
-        return 1 + ret.value();
     } else if (args[0] == "--wait-seconds") {
         auto ret = ParseValue(args.subspan(1), waitSeconds);
+        if (!ret) return ret.error();
+        return 1 + ret.value();
+    } else if (args[0] == "--inference-engine-wait-seconds") {
+        auto ret = ParseValue(args.subspan(1), inferenceEngineWaitSeconds);
         if (!ret) return ret.error();
         return 1 + ret.value();
     } else if (args[0] == "--qp") {
         auto ret = ParseValue(args.subspan(1), qp);
         if (!ret) return ret.error();
         return 1 + ret.value();
+    } else if (args[0] == "--profile") {
+        profile = true;
+        return 1;
+    } else if (args[0] == "--profile-interval-ms") {
+        auto ret = ParseValue(args.subspan(1), profileIntervalMs);
+        if (!ret) return ret.error();
+        return 1 + ret.value();
+    } else if (args[0] == "--profile-verbose") {
+        profile = true;
+        profileVerbose = true;
+        return 1;
     } else {
         return EncoderConfigArguments::Parse(args);
     }
@@ -587,6 +613,18 @@ expected<void> BenchmarkArguments::Verify()
         std::cerr << "Invalid value for --num-iterations" << std::endl;
         return make_error_code(Error::command_line_parse_error);
     }
+    if (waitSeconds < 0) {
+        std::cerr << "Invalid value for --wait-seconds (must be >= 0)" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    if (inferenceEngineWaitSeconds < 0) {
+        std::cerr << "Invalid value for --inference-engine-wait-seconds (must be >= 0)" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    if (profileIntervalMs < 10) {
+        std::cerr << "Invalid value for --profile-interval-ms (must be >= 10)" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
 
     return {};
 }
@@ -600,6 +638,7 @@ void BenchmarkArguments::PrintHelpImpl()
     std::cerr << "  --input-width           Input frame width (default: " << inputWidth << ")\n";
     std::cerr << "  --input-height          Input frame height (default: " << inputHeight << ")\n";
     std::cerr << "  --output-dir            Specify the output directory (default: " << outputDirectory << ")\n";
+    std::cerr << "  --save-stats            Save per-frame statistics to stats.json (flag)\n";
     std::cerr << "  --num-encoders          Specify the number of encoders to run in parallel (default: " << numEncoders
               << ")\n";
     std::cerr << "  --num-decoders          Specify the number of decoders to run in parallel (default: " << numDecoders
@@ -607,9 +646,15 @@ void BenchmarkArguments::PrintHelpImpl()
     std::cerr << "  --target-fps            Specify the target frames per second (default: " << targetFps << ")\n";
     std::cerr << "  --duration-seconds      Duration of each iteration (default: " << durationSeconds << ")\n";
     std::cerr << "  --num-iterations        Number of full benchmark iterations (default: " << numIterations << ")\n";
-    std::cerr << "  --strict-fps-target     Strictly enforce the target fps (default: " << strictFpsTarget << ")\n";
     std::cerr << "  --wait-seconds          Seconds to wait between benchmark phases (default: " << waitSeconds << ")\n";
+    std::cerr << "  --inference-engine-wait-seconds\n";
+    std::cerr << "                          Seconds to wait after the inference engine setup (default: "
+              << inferenceEngineWaitSeconds << ")\n";
     std::cerr << "  --qp                    Quantization parameter for encoding (default: " << qp << ")\n";
+    std::cerr << "  --profile               Report time, CPU time and memory per phase and event (flag)\n";
+    std::cerr << "  --profile-interval-ms   Interval for sampling the process metrics in the background (default: "
+              << profileIntervalMs << ")\n";
+    std::cerr << "  --profile-verbose       Also list the periodic samples; implies --profile (flag)\n";
 }
 
 expected<int> EncodeArguments::Parse(std::span<std::string_view> args)
