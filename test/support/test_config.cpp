@@ -66,7 +66,9 @@ bool ParseWinMlInitMode(std::string_view value, WinMlInitMode& mode)
 
 bool ParseLogLevel(std::string_view value, LogLevel& level)
 {
-    if (value == "debug") {
+    if (value == "trace") {
+        level = LogLevel::Trace;
+    } else if (value == "debug") {
         level = LogLevel::Debug;
     } else if (value == "info") {
         level = LogLevel::Info;
@@ -77,8 +79,8 @@ bool ParseLogLevel(std::string_view value, LogLevel& level)
     } else if (value == "fatal") {
         level = LogLevel::Fatal;
     } else {
-        std::cerr << "Unknown log level: " << value << " (expected 'debug', 'info', 'warn', 'error', or 'fatal')"
-                  << std::endl;
+        std::cerr << "Unknown log level: " << value
+                  << " (expected 'trace', 'debug', 'info', 'warn', 'error', or 'fatal')" << std::endl;
         return false;
     }
     return true;
@@ -176,7 +178,7 @@ void PrintTestConfigHelp()
               << ComputeUnitToString(s_testConfig.computeUnit) << ")" << std::endl;
     std::cerr << "  --winml-init <mode>    WinML init mode: appsdk, self-contained (default: "
               << WinMlInitModeToString(s_testConfig.winmlInitMode) << ")" << std::endl;
-    std::cerr << "  --log-level <level>    Log level: debug, info, warn, error, fatal (default: "
+    std::cerr << "  --log-level <level>    Log level: trace, debug, info, warn, error, fatal (default: "
               << LogLevelToString(s_testConfig.logLevel) << ")" << std::endl;
     std::cerr << "Environment defaults: LIBMLVC_TEST_MLVC_VERSION, LIBMLVC_TEST_COMPUTE_UNIT, "
                  "LIBMLVC_TEST_WINML_INIT, LIBMLVC_TEST_LOG_LEVEL (CLI overrides environment)"

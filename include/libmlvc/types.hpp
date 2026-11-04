@@ -44,12 +44,14 @@ constexpr int DEFAULT_QP = 26;
 // --------------------------------------------------------------------------------------
 
 /// Severity of a libmlvc log message.
-enum struct LogLevel { Debug, Info, Warn, Error, Fatal };
+enum struct LogLevel { Trace, Debug, Info, Warn, Error, Fatal };
 
 /// Returns the string name of a log level.
 inline const char* LogLevelToString(LogLevel level)
 {
     switch (level) {
+    case LogLevel::Trace:
+        return "TRACE";
     case LogLevel::Debug:
         return "DEBUG";
     case LogLevel::Info:
@@ -410,6 +412,43 @@ inline const char* OnnxExecutionProviderToString(const OnnxExecutionProvider ep)
     return "unknown";
 }
 
+/// How the manager preloads inference sessions.
+enum struct SessionPreloadMode {
+    AT_INIT,       ///< Creates every session during manager initialization.
+    ON_FIRST_USE,  ///< Creates every session of a model version on a background thread once the version is first used,
+                   ///< by creating an encoder or decoding a frame; a needed session moves to the front of the queue.
+    NONE,          ///< Creates each session on the calling thread when an encoder or decoder first needs it.
+};
+
+/// Returns the string name of a session preload mode.
+inline const char* SessionPreloadModeToString(SessionPreloadMode mode)
+{
+    switch (mode) {
+    case SessionPreloadMode::AT_INIT:
+        return "at-init";
+    case SessionPreloadMode::ON_FIRST_USE:
+        return "on-first-use";
+    case SessionPreloadMode::NONE:
+        return "none";
+    }
+    return "unknown";
+}
+
+/// Parses `at-init`, `on-first-use`, or `none` as a session preload mode.
+inline expected<SessionPreloadMode> StringToSessionPreloadMode(std::string_view value)
+{
+    if (value == "at-init") {
+        return SessionPreloadMode::AT_INIT;
+    }
+    if (value == "on-first-use") {
+        return SessionPreloadMode::ON_FIRST_USE;
+    }
+    if (value == "none") {
+        return SessionPreloadMode::NONE;
+    }
+    return make_error_code(Error::invalid_argument);
+}
+
 /// Windows ML runtime deployment mode.
 enum struct WinMlInitMode {
     AppSdk,         ///< Uses Windows App SDK deployment.
@@ -489,8 +528,10 @@ using InitializeProgressCallback = std::function<void(const InitializeProgressEv
 struct ManagerParams {
     ComputeUnit computeUnit{ ComputeUnit::NPU };  ///< Inference compute unit to request.
     std::filesystem::path cacheDir{};             ///< Root cache directory; empty selects a platform default.
+                                                  ///< Must be dedicated to MLVC: the model cache may delete any
+                                                  ///< folder in the `models*` folders inside it.
     bool enableModelCache{ true };                ///< Enables persistent caching of compiled inference models.
-    bool enableSessionPreloading{ true };  ///< Creates sessions during initialization and retains them for reuse.
+    SessionPreloadMode sessionPreloadMode{ SessionPreloadMode::AT_INIT };  ///< How inference sessions are preloaded.
     WinMlInitMode winmlInitMode{ WinMlInitMode::AppSdk };  ///< Windows ML deployment mode; ignored outside Windows.
 };
 
@@ -507,8 +548,8 @@ struct Capabilities {
 /// Windows App Runtime and ONNX fields are meaningful only for `InferenceBackend::WINDOWSML`.
 /// Version and driver strings are empty when unavailable.
 struct ManagerInfo {
-    bool enableModelCache{};         ///< Whether model caching is enabled.
-    bool enableSessionPreloading{};  ///< Whether session preloading is enabled.
+    bool enableModelCache{};                  ///< Whether model caching is enabled.
+    SessionPreloadMode sessionPreloadMode{};  ///< How inference sessions are preloaded.
 
     InferenceBackend inferenceBackend{ InferenceBackend::WINDOWSML };  ///< Initialized inference backend.
     ModelType modelType{ ModelType::UNKNOWN };                         ///< Loaded model format.

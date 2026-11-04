@@ -29,6 +29,7 @@ public:
                                                 const std::map<std::string, std::span<const std::byte>>& weightsData,
                                                 std::string_view cacheKey,
                                                 const std::optional<std::string>& functionName = std::nullopt) override;
+    expected<void> ValidateModelCache(std::string_view cacheKey) const override;
     expected<bool> PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
                                      const std::map<std::string, std::span<const std::byte>>& weightsData,
                                      std::string_view cacheKey) override;
@@ -53,7 +54,7 @@ private:
     expected<void> CompileModelToEpContext(std::string_view name, std::span<const std::byte> modelData,
                                            const std::map<std::string, std::span<const std::byte>>& weightsData,
                                            const std::filesystem::path& modelPath);
-    bool SupportsEpContextCaching() const;
+    bool UsesModelCache() const;
     std::string FullCacheKey(std::string_view cacheKey) const;
 
     const WinMlEngineParams m_params;

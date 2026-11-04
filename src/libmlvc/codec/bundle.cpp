@@ -8,9 +8,12 @@
 
 #include <libmlvc/error_codes.hpp>
 
+#include <algorithm>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <ranges>
+#include <tuple>
 
 namespace libmlvc {
 
@@ -20,7 +23,7 @@ expected<std::vector<std::byte>> ReadFile(const std::filesystem::path& path)
 {
     std::ifstream file(path, std::ios::binary);
     if (file.fail()) {
-        MLVC_LOG_ERROR("Failed to open file: %s", path.filename().string().c_str());
+        MLVC_LOG_ERROR("Failed to open file: %s", ToLogString(path.filename()).c_str());
         return make_error_code(Error::io_error);
     }
 
@@ -124,8 +127,8 @@ public:
     {
         auto manifest = PeekManifest(path);
         if (!manifest) {
-            MLVC_LOG_ERROR("Failed to peek manifest from bundle file: %s, error: %s", path.filename().string().c_str(),
-                           manifest.error().message().c_str());
+            MLVC_LOG_ERROR("Failed to peek manifest from bundle file: %s, error: %s",
+                           ToLogString(path.filename()).c_str(), manifest.error().message().c_str());
             return manifest.error();
         }
 
@@ -150,9 +153,9 @@ private:
 // Functions
 // ----------------------------------------------------------------
 
-expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesystem::path& bundlesDir,
-                                                               std::span<const MlvcVersion> versions,
-                                                               const InferenceEngineInfo& engineInfo)
+expected<std::vector<std::vector<std::byte>>> ReadBundleBlobs(const std::filesystem::path& bundlesDir,
+                                                              std::span<const MlvcVersion> versions,
+                                                              const InferenceEngineInfo& engineInfo)
 {
     MLVC_LOG_INFO("Discovering model bundles...");
 
@@ -164,29 +167,33 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
     }
 
     std::map<MlvcVersion, BundleBlob> bundlesMap;
-    for (const auto& entry : std::filesystem::directory_iterator(bundlesDir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".tar") {
-            MLVC_LOG_DEBUG("Skipping non-regular file or non-tar file: %s", entry.path().filename().string().c_str());
+    // Use error codes, not exceptions, which would escape to the host
+    std::error_code iterEc;
+    std::filesystem::directory_iterator dirIter(bundlesDir, iterEc);
+    for (; !iterEc && dirIter != std::filesystem::directory_iterator(); dirIter.increment(iterEc)) {
+        const auto& entry = *dirIter;
+        const auto fileName = ToLogString(entry.path().filename());
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".tar") {
+            MLVC_LOG_TRACE("Skipping non-regular file or non-tar file: %s", fileName.c_str());
             continue;
         }
         auto bundle = BundleBlob::FromPath(entry.path());
         if (!bundle) {
-            MLVC_LOG_WARN("Failed to read bundle blob from %s, skipping", entry.path().filename().string().c_str());
+            MLVC_LOG_WARN("Failed to read bundle blob from %s, skipping", fileName.c_str());
             continue;
         }
 
         // Version filtering: Only keep selected versions
         const auto& manifest = bundle->GetManifest();
         if (std::ranges::find(versions, manifest.mlvcVersion) == versions.end()) {
-            MLVC_LOG_DEBUG("Bundle %s version %s not in requested versions list, skipping",
-                           entry.path().filename().string().c_str(), manifest.mlvcVersion.ToString().c_str());
+            MLVC_LOG_DEBUG("Bundle %s version %s not in requested versions list, skipping", fileName.c_str(),
+                           manifest.mlvcVersion.ToString().c_str());
             continue;
         }
 
         // Filter out bundles that are not compatible with the current platform
         if (!IsBundleCompatible(manifest, engineInfo)) {
-            MLVC_LOG_DEBUG("Bundle %s is not compatible with this inference engine, skipping",
-                           entry.path().filename().string().c_str());
+            MLVC_LOG_DEBUG("Bundle %s is not compatible with this inference engine, skipping", fileName.c_str());
             continue;
         }
 
@@ -195,14 +202,18 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
             const auto& existingBundle = bundlesMap.at(manifest.mlvcVersion);
             if (GetBundlePriority(existingBundle.GetManifest().targetDevice) >= GetBundlePriority(manifest.targetDevice)) {
                 MLVC_LOG_DEBUG("Bundle %s has same version as previously found bundle but smaller priority, skipping",
-                               entry.path().filename().string().c_str());
+                               fileName.c_str());
                 continue;
             }
         }
 
         // Accept the bundle
-        MLVC_LOG_INFO("Found model bundle: %s", entry.path().filename().string().c_str());
+        MLVC_LOG_INFO("Found model bundle: %s", fileName.c_str());
         bundlesMap.insert_or_assign(manifest.mlvcVersion, std::move(bundle.value()));
+    }
+    if (iterEc) {
+        MLVC_LOG_ERROR("Failed to list model bundles directory: %s", iterEc.message().c_str());
+        return make_error_code(Error::io_error);
     }
 
     // Check that all requested versions are found
@@ -227,118 +238,36 @@ expected<std::vector<std::vector<std::byte>>> LoadModelBundles(const std::filesy
 // ModelBundle
 // ----------------------------------------------------------------
 
-ModelBundle::ModelBundle(IInferenceEngine& engine, bool enableModelCache, bool enableSessionPreloading)
-    : m_engine(engine), m_enableModelCache(enableModelCache), m_enableSessionPreloading(enableSessionPreloading)
+expected<std::unique_ptr<ModelBundle>> ModelBundle::Create(IInferenceEngine& engine, ThreadPool* sessionCreationPool,
+                                                           std::span<const std::byte> bundleBlob, bool enableModelCache,
+                                                           SessionPreloadMode sessionPreloadMode, CancelToken cancelToken,
+                                                           const InitializeProgressCallback& progressCallback)
 {
+    auto bundle =
+        std::unique_ptr<ModelBundle>(new ModelBundle(engine, sessionCreationPool, enableModelCache, sessionPreloadMode));
+    if (auto ret = bundle->Initialize(bundleBlob, std::move(cancelToken), progressCallback); !ret) {
+        return ret.error();
+    }
+    return bundle;
 }
 
-expected<void> ModelBundle::Initialize(std::span<const std::byte> bundleBlob, CancelToken cancelToken,
-                                       const InitializeProgressCallback& progressCallback)
+expected<void> ModelBundle::ValidateModelCache() const
 {
-    auto checkpoint = [&cancelToken, &progressCallback](const std::string& status) -> expected<void> {
-        if (progressCallback) progressCallback(StatusMessage{ status });
-        if (cancelToken.IsCancelled()) {
-            MLVC_LOG_INFO("Bundle initialization cancelled");
-            return make_error_code(Error::operation_cancelled);
-        }
+    if (!m_enableModelCache) {
         return {};
-    };
-
-    // Extract bundle files
-    BundleFiles bundleFiles;
-    {
-        if (auto ret = checkpoint("Extracting bundle files"); !ret) return ret.error();
-        auto entries = ExtractTar(bundleBlob);
-        if (!entries) {
-            MLVC_LOG_ERROR("Failed to extract tar: %s", entries.error().message().c_str());
-            return entries.error();
+    }
+    for (const auto& [modelId, modelManifest] : m_manifest.modelManifests) {
+        for (const auto& [modelPartId, bundlePart] : modelManifest.modelParts) {
+            const auto source = GetModelSource(modelId, bundlePart, {});
+            if (!source) {
+                return source.error();
+            }
+            if (auto ret = m_engine.ValidateModelCache(source->cacheKey); !ret) {
+                MLVC_LOG_ERROR("Failed to validate model cache for model %s part %s: %s", modelId.c_str(),
+                               ModelPartIdToString(modelPartId), ret.error().message().c_str());
+                return ret.error();
+            }
         }
-        bundleFiles = std::move(entries.value());
-    }
-
-    // Parse manifest
-    {
-        if (auto ret = checkpoint("Parsing model manifest"); !ret) return ret.error();
-        const auto manifestIt = bundleFiles.find("bundle_manifest.json");
-        if (manifestIt == bundleFiles.end()) {
-            MLVC_LOG_ERROR("Manifest file not found in model bundle");
-            return make_error_code(Error::io_error);
-        }
-        auto manifest = BundleManifest::FromJsonBuffer(manifestIt->second);
-        if (!manifest) {
-            MLVC_LOG_ERROR("Failed to parse bundle manifest: %s", manifest.error().message().c_str());
-            return manifest.error();
-        }
-        m_manifest = std::move(manifest.value());
-    }
-
-    // Check compatibility
-    if (!IsBundleCompatible(m_manifest, m_engine.GetInfo())) {
-        MLVC_LOG_ERROR("Model bundle is not compatible with the inference engine: bundle(%s, %s, %s), engine(%s, %s)",
-                       m_manifest.bundleName.c_str(), ModelTypeToString(m_manifest.modelType),
-                       TargetDeviceToString(m_manifest.targetDevice),
-                       InferenceBackendToString(m_engine.GetInfo().inferenceBackend),
-                       OnnxExecutionProviderToString(m_engine.GetInfo().onnxExecutionProvider));
-        return make_error_code(Error::invalid_argument);
-    }
-
-    // Load scale decoder data
-    if (auto ret = checkpoint("Loading scale decoder data"); !ret) return ret.error();
-    if (auto ret = LoadScaleDecoderData(bundleFiles); !ret) {
-        MLVC_LOG_ERROR("Failed to load scale decoder data for bundle %s %s: %s", m_manifest.bundleName.c_str(),
-                       m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
-        return ret.error();
-    }
-
-    // Load PMFs
-    if (auto ret = checkpoint("Loading PMFs"); !ret) return ret.error();
-    if (auto ret = LoadPmfs(bundleFiles); !ret) {
-        MLVC_LOG_ERROR("Failed to load PMFs for bundle %s %s: %s", m_manifest.bundleName.c_str(),
-                       m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
-        return ret.error();
-    }
-
-    // Compile the missing models into the model cache
-    bool modelsCached = false;
-    if (m_enableModelCache) {
-        if (auto ret = checkpoint("Preparing model cache"); !ret) return ret.error();
-        auto cached = PrepareModelCache(bundleFiles, cancelToken, progressCallback);
-        if (!cached) {
-            MLVC_LOG_ERROR("Failed to prepare model cache for bundle %s %s: %s", m_manifest.bundleName.c_str(),
-                           m_manifest.mlvcVersion.ToString().c_str(), cached.error().message().c_str());
-            return cached.error();
-        }
-        modelsCached = cached.value();
-    }
-
-    // Preload sessions if enabled
-    if (m_enableSessionPreloading) {
-        if (auto ret = checkpoint("Preloading inference sessions"); !ret) return ret.error();
-        if (auto ret = PreloadSessions(bundleFiles, cancelToken, progressCallback); !ret) {
-            MLVC_LOG_ERROR("Failed to preload sessions for bundle %s %s: %s", m_manifest.bundleName.c_str(),
-                           m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
-            return ret.error();
-        }
-    }
-
-    // Keep a copy of the bundle data if sessions are created on demand from uncached models
-    if (!m_enableSessionPreloading && !modelsCached) {
-        MLVC_LOG_INFO("Keeping a copy of the bundle data (%.1lf MB)",
-                      static_cast<double>(bundleBlob.size()) / (1024.0 * 1024.0));
-        m_bundleBlob.assign(bundleBlob.begin(), bundleBlob.end());
-        for (const auto& [path, data] : bundleFiles) {
-            const auto offset = static_cast<size_t>(data.data() - bundleBlob.data());
-            m_bundleFiles[path] = std::span<const std::byte>(m_bundleBlob).subspan(offset, data.size());
-        }
-    }
-
-    MLVC_LOG_INFO("Loaded bundle: %s, %s, %s, %s, ts: %s, registry: %zu, models: %zu",
-                  m_manifest.mlvcVersion.ToString().c_str(), m_manifest.bundleName.c_str(),
-                  ModelTypeToString(m_manifest.modelType), TargetDeviceToString(m_manifest.targetDevice),
-                  m_manifest.timestamp.c_str(), m_manifest.modelRegistry.size(), m_manifest.modelManifests.size());
-
-    if (progressCallback) {
-        progressCallback(StatusMessage{ "Bundle loaded successfully" });
     }
     return {};
 }
@@ -501,16 +430,187 @@ expected<std::shared_ptr<const BitEstimatorPmf>> ModelBundle::GetBitEstimatorPmf
 
 expected<InferenceSessionPtr> ModelBundle::GetInferenceSession(const std::string& modelId, const ModelPartId partId) const
 {
-    MLVC_LOG_DEBUG("GetInferenceSession: version=%s, modelId=%s, partId=%s", m_manifest.mlvcVersion.ToString().c_str(),
+    MLVC_LOG_TRACE("GetInferenceSession: version=%s, modelId=%s, partId=%s", m_manifest.mlvcVersion.ToString().c_str(),
                    modelId.c_str(), ModelPartIdToString(partId));
 
-    auto sessionIt = m_inferenceSessions.find({ modelId, partId });
-    if (sessionIt != m_inferenceSessions.end()) {
-        MLVC_LOG_DEBUG("Returning previously created inference session for model %s", modelId.c_str());
-        return sessionIt->second;
+    // Reject sessions that aren't in the bundle, so they never get a slot
+    const auto modelIt = m_manifest.modelManifests.find(modelId);
+    if (modelIt == m_manifest.modelManifests.end() || !modelIt->second.modelParts.contains(partId)) {
+        MLVC_LOG_ERROR("Model %s part %s not found in the bundle", modelId.c_str(), ModelPartIdToString(partId));
+        return make_error_code(Error::invalid_argument);
     }
 
-    return CreateInferenceSession(modelId, partId, m_bundleFiles);
+    std::unique_lock sessionsLock(m_inferenceSessionsMutex);
+
+    // ON_FIRST_USE: a decoder's first request queues every session of the bundle, this one first
+    if (m_sessionPreloadMode == SessionPreloadMode::ON_FIRST_USE) {
+        QueueSessionCreations(std::pair{ modelId, partId });
+    }
+
+    // Find or add the session's slot
+    // If background creation was queued, update its priority to high
+    auto& slot = m_inferenceSessions[{ modelId, partId }];
+    const auto task = slot.task;
+    if (task) {
+        task->SetPriority(ThreadPool::Priority::HIGH);
+    }
+    sessionsLock.unlock();
+
+    // Wait for the background creation
+    if (task) {
+        if (const auto status = task->Wait(); status != ThreadPool::Task::Status::COMPLETED) {
+            const auto error = status == ThreadPool::Task::Status::FAILED ? task->GetError()
+                                                                          : make_error_code(Error::operation_cancelled);
+            MLVC_LOG_ERROR("Failed to get inference session for model %s part %s: %s", modelId.c_str(),
+                           ModelPartIdToString(partId), error.message().c_str());
+            return error;
+        }
+    }
+
+    // Return already created session
+    std::lock_guard slotLock(slot.mutex);
+    if (slot.session) {
+        MLVC_LOG_TRACE("Returning previously created inference session for model %s", modelId.c_str());
+        return slot.session;
+    }
+
+    // Create session on-demand if it wasn't already created
+    auto session = CreateInferenceSession(modelId, partId, m_bundleFiles);
+    if (session) {
+        slot.session = session.value();
+    }
+    return session;
+}
+
+void ModelBundle::PreloadSessionsInBackground() const
+{
+    std::lock_guard sessionsLock(m_inferenceSessionsMutex);
+    QueueSessionCreations(std::nullopt);
+}
+
+ModelBundle::ModelBundle(IInferenceEngine& engine, ThreadPool* sessionCreationPool, bool enableModelCache,
+                         SessionPreloadMode sessionPreloadMode)
+    : m_engine(engine)
+    , m_sessionCreationPool(sessionCreationPool)
+    , m_enableModelCache(enableModelCache)
+    , m_sessionPreloadMode(sessionPreloadMode)
+{
+}
+
+expected<void> ModelBundle::Initialize(std::span<const std::byte> bundleBlob, CancelToken cancelToken,
+                                       const InitializeProgressCallback& progressCallback)
+{
+    if (m_sessionPreloadMode == SessionPreloadMode::ON_FIRST_USE && !m_sessionCreationPool) {
+        MLVC_LOG_ERROR("Creating sessions in the background requires a session creation pool");
+        return make_error_code(Error::invalid_argument);
+    }
+
+    auto checkpoint = [&cancelToken, &progressCallback](const std::string& status) -> expected<void> {
+        if (progressCallback) progressCallback(StatusMessage{ status });
+        if (cancelToken.IsCancelled()) {
+            MLVC_LOG_INFO("Bundle initialization cancelled");
+            return make_error_code(Error::operation_cancelled);
+        }
+        return {};
+    };
+
+    // Extract bundle files
+    BundleFiles bundleFiles;
+    {
+        if (auto ret = checkpoint("Extracting bundle files"); !ret) return ret.error();
+        auto entries = ExtractTar(bundleBlob);
+        if (!entries) {
+            MLVC_LOG_ERROR("Failed to extract tar: %s", entries.error().message().c_str());
+            return entries.error();
+        }
+        bundleFiles = std::move(entries.value());
+    }
+
+    // Parse manifest
+    {
+        if (auto ret = checkpoint("Parsing model manifest"); !ret) return ret.error();
+        const auto manifestIt = bundleFiles.find("bundle_manifest.json");
+        if (manifestIt == bundleFiles.end()) {
+            MLVC_LOG_ERROR("Manifest file not found in model bundle");
+            return make_error_code(Error::io_error);
+        }
+        auto manifest = BundleManifest::FromJsonBuffer(manifestIt->second);
+        if (!manifest) {
+            MLVC_LOG_ERROR("Failed to parse bundle manifest: %s", manifest.error().message().c_str());
+            return manifest.error();
+        }
+        m_manifest = std::move(manifest.value());
+    }
+
+    // Check compatibility
+    if (!IsBundleCompatible(m_manifest, m_engine.GetInfo())) {
+        MLVC_LOG_ERROR("Model bundle is not compatible with the inference engine: bundle(%s, %s, %s), engine(%s, %s)",
+                       m_manifest.bundleName.c_str(), ModelTypeToString(m_manifest.modelType),
+                       TargetDeviceToString(m_manifest.targetDevice),
+                       InferenceBackendToString(m_engine.GetInfo().inferenceBackend),
+                       OnnxExecutionProviderToString(m_engine.GetInfo().onnxExecutionProvider));
+        return make_error_code(Error::invalid_argument);
+    }
+
+    // Load scale decoder data
+    if (auto ret = checkpoint("Loading scale decoder data"); !ret) return ret.error();
+    if (auto ret = LoadScaleDecoderData(bundleFiles); !ret) {
+        MLVC_LOG_ERROR("Failed to load scale decoder data for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+                       m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
+        return ret.error();
+    }
+
+    // Load PMFs
+    if (auto ret = checkpoint("Loading PMFs"); !ret) return ret.error();
+    if (auto ret = LoadPmfs(bundleFiles); !ret) {
+        MLVC_LOG_ERROR("Failed to load PMFs for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+                       m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
+        return ret.error();
+    }
+
+    // Compile the missing models into the model cache
+    bool modelsCached = false;
+    if (m_enableModelCache) {
+        if (auto ret = checkpoint("Preparing model cache"); !ret) return ret.error();
+        auto cached = PrepareModelCache(bundleFiles, cancelToken, progressCallback);
+        if (!cached) {
+            MLVC_LOG_ERROR("Failed to prepare model cache for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+                           m_manifest.mlvcVersion.ToString().c_str(), cached.error().message().c_str());
+            return cached.error();
+        }
+        modelsCached = cached.value();
+    }
+
+    // Preload sessions if enabled
+    if (m_sessionPreloadMode == SessionPreloadMode::AT_INIT) {
+        if (auto ret = checkpoint("Preloading inference sessions"); !ret) return ret.error();
+        if (auto ret = PreloadSessions(bundleFiles, cancelToken, progressCallback); !ret) {
+            MLVC_LOG_ERROR("Failed to preload sessions for bundle %s %s: %s", m_manifest.bundleName.c_str(),
+                           m_manifest.mlvcVersion.ToString().c_str(), ret.error().message().c_str());
+            return ret.error();
+        }
+    }
+
+    // Keep a copy of the bundle data if sessions are created later from uncached models
+    if (m_sessionPreloadMode != SessionPreloadMode::AT_INIT && !modelsCached) {
+        MLVC_LOG_INFO("Keeping a copy of the bundle data (%.1lf MB)",
+                      static_cast<double>(bundleBlob.size()) / (1024.0 * 1024.0));
+        m_bundleBlob.assign(bundleBlob.begin(), bundleBlob.end());
+        for (const auto& [path, data] : bundleFiles) {
+            const auto offset = static_cast<size_t>(data.data() - bundleBlob.data());
+            m_bundleFiles[path] = std::span<const std::byte>(m_bundleBlob).subspan(offset, data.size());
+        }
+    }
+
+    MLVC_LOG_INFO("Loaded bundle: %s, %s, %s, %s, ts: %s, registry: %zu, models: %zu",
+                  m_manifest.mlvcVersion.ToString().c_str(), m_manifest.bundleName.c_str(),
+                  ModelTypeToString(m_manifest.modelType), TargetDeviceToString(m_manifest.targetDevice),
+                  m_manifest.timestamp.c_str(), m_manifest.modelRegistry.size(), m_manifest.modelManifests.size());
+
+    if (progressCallback) {
+        progressCallback(StatusMessage{ "Bundle loaded successfully" });
+    }
+    return {};
 }
 
 expected<void> ModelBundle::LoadScaleDecoderData(const BundleFiles& files)
@@ -626,11 +726,63 @@ expected<void> ModelBundle::PreloadSessions(const BundleFiles& files, CancelToke
                                ModelPartIdToString(modelPartId), session.error().message().c_str());
                 return session.error();
             }
-            m_inferenceSessions[{ modelId, modelPartId }] = std::move(session.value());
+            m_inferenceSessions[{ modelId, modelPartId }].session = std::move(session.value());
         }
     }
     MLVC_LOG_INFO("Preloaded %zu inference sessions", m_inferenceSessions.size());
     return {};
+}
+
+// Needs m_inferenceSessionsMutex: queues the creation of every session not queued yet, a requested one first
+void ModelBundle::QueueSessionCreations(const std::optional<std::pair<std::string, ModelPartId>>& requested) const
+{
+    if (!m_sessionCreationPool) {
+        MLVC_LOG_WARN("Creating sessions in the background requires a session creation pool");
+        return;
+    }
+
+    struct Session {
+        bool requested{};
+        int area{};
+        std::string modelId;
+        ModelPartId partId{};
+    };
+    std::vector<Session> sessions;
+    for (const auto& [modelId, model] : m_manifest.modelManifests) {
+        const auto metadataIt = m_manifest.modelMetadata.find(modelId);
+        const int area = metadataIt != m_manifest.modelMetadata.end()
+                             ? metadataIt->second->modelWidth * metadataIt->second->modelHeight
+                             : 0;
+        for (const auto partId : model.modelParts | std::views::keys) {
+            if (!m_inferenceSessions.contains({ modelId, partId })) {
+                sessions.push_back({ .requested = requested == std::pair{ modelId, partId },
+                                     .area = area,
+                                     .modelId = modelId,
+                                     .partId = partId });
+            }
+        }
+    }
+    if (sessions.empty()) return;
+
+    // The requested session first, then largest resolution first, where a call most likely starts; an encoder before
+    // its decoder
+    std::ranges::stable_sort(sessions, std::ranges::greater{},
+                             [](const Session& session) { return std::pair{ session.requested, session.area }; });
+    MLVC_LOG_INFO("Queuing %zu inference sessions of bundle %s for background creation", sessions.size(),
+                  m_manifest.mlvcVersion.ToString().c_str());
+    for (const auto& session : sessions) {
+        auto& slot = m_inferenceSessions[{ session.modelId, session.partId }];
+        slot.task = m_sessionCreationPool->Submit(
+            session.modelId + "/" + ModelPartIdToString(session.partId),
+            [this, &slot, modelId = session.modelId, partId = session.partId]() -> expected<void> {
+                auto created = CreateInferenceSession(modelId, partId, m_bundleFiles);
+                if (!created) return created.error();
+                std::lock_guard slotLock(slot.mutex);
+                slot.session = std::move(created.value());
+                return {};
+            },
+            session.requested ? ThreadPool::Priority::HIGH : ThreadPool::Priority::NORMAL);
+    }
 }
 
 expected<ModelBundle::ModelSource> ModelBundle::GetModelSource(const std::string& modelId, const ModelPartManifest& part,

@@ -34,6 +34,7 @@ set(LIBMLVC_SOURCES
     libmlvc/common/fp16.hpp
     libmlvc/common/platform_names.hpp
     libmlvc/common/tar.hpp
+    libmlvc/common/thread_pool.hpp
     libmlvc/codec/codec.hpp
     libmlvc/entropy/rans_coder.hpp
     libmlvc/schema/pmf.hpp
@@ -61,6 +62,7 @@ set(LIBMLVC_SOURCES
     libmlvc/common/utils.cpp
     libmlvc/platform_info.cpp
     libmlvc/common/tar.cpp
+    libmlvc/common/thread_pool.cpp
     libmlvc/entropy/latent_coder.cpp
     libmlvc/error_codes.cpp
     libmlvc/codec/core/inference_model.cpp

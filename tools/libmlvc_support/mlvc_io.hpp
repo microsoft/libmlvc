@@ -66,5 +66,6 @@ private:
 
 expected<std::vector<MlvcAccessUnit>> ReadMlvcAccessUnits(const std::filesystem::path& filename,
                                                           std::optional<size_t> maxNumAccessUnits = std::nullopt);
+expected<void> WriteMlvcAccessUnits(const std::filesystem::path& filename, std::span<const MlvcAccessUnit> accessUnits);
 
 }  // namespace libmlvc

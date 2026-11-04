@@ -47,8 +47,9 @@ struct RansConstants {
 
     // only N-1 bits are used as exact reciprocal of (N-1)-bit integer takes N bits
     static constexpr inline size_t StateBits = CHAR_BIT * sizeof(state_t) - 1;
-    // Maximum possible scale_bits
-    static constexpr inline size_t MaxScaleBits = std::min(StateBits - 1, sizeof(freq_t) * CHAR_BIT);
+    // Maximum possible scale_bits: the scale must divide LowerBound to round trip
+    static constexpr inline size_t MaxScaleBits =
+        std::min(StateBits - CHAR_BIT * sizeof(unit_t), sizeof(freq_t) * CHAR_BIT);
     // The normalization interval lower bound ('l' in the paper)
     static constexpr inline state_t LowerBound = static_cast<state_t>(1) << (StateBits - CHAR_BIT * sizeof(unit_t));
 };

@@ -90,7 +90,7 @@ EncoderFrameInfo GopManager::ComputeFrameInfo(const EncoderConfig& config, const
 
     // Periodic I-frame
     if (config.iframePeriod > 0 && (gopIdx >= config.iframePeriod || frameIdx >= config.iframePeriod)) {
-        MLVC_LOG_DEBUG("ComputeFrameInfo: Periodic I-frame (frameIdx=%d, gopIdx=%d, period=%d)", frameIdx, gopIdx,
+        MLVC_LOG_TRACE("ComputeFrameInfo: Periodic I-frame (frameIdx=%d, gopIdx=%d, period=%d)", frameIdx, gopIdx,
                        config.iframePeriod);
         return MakeIframeInfo();
     }
@@ -130,7 +130,7 @@ EncoderFrameInfo GopManager::ComputeFrameInfo(const EncoderConfig& config, const
 
     // Default I/P frame
     if (frameIdx == 0) {
-        MLVC_LOG_DEBUG("ComputeFrameInfo: First frame in GOP, using I-frame");
+        MLVC_LOG_TRACE("ComputeFrameInfo: First frame in GOP, using I-frame");
         return MakeIframeInfo();
     }
     return MakeFrameInfo(FrameType::P_FRAME);

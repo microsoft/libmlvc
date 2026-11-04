@@ -14,6 +14,7 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 namespace libmlvc {
 
@@ -62,6 +63,22 @@ void DefaultLogHandler(LogLevel level, const std::source_location& loc, std::str
     std::fprintf(stderr, "%s [T#%llu][%5s][%s:%u]: %.*s\n", timestamp.c_str(),
                  static_cast<unsigned long long>(threadId), LogLevelToString(level), basename,
                  static_cast<unsigned>(loc.line()), static_cast<int>(msg.size()), msg.data());
+}
+
+std::string ToLogString(const std::filesystem::path& path) noexcept
+{
+#if defined(_WIN32)
+    const std::wstring& wide = path.native();
+    if (wide.empty()) return {};
+    const int wideLen = static_cast<int>(wide.size());
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "<unprintable path>";
+    std::string result(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen, result.data(), len, nullptr, nullptr);
+    return result;
+#else
+    return path.native();
+#endif
 }
 
 Logger& Logger::Instance() noexcept

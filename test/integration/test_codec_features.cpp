@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include "libmlvc/bitstream/coder.hpp"
 #include "libmlvc/codec/codec.hpp"
 #include "libmlvc/codec/core/core.hpp"
 #include "libmlvc/codec/core/reference_manager.hpp"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -234,7 +236,7 @@ public:
         int filteredFrameCount = 0;
 
         for (int frameId = 0; frameId < m_params.numFrames; frameId++) {
-            MLVC_LOG_DEBUG("CodecFeatureTest: frame %d", frameId);
+            MLVC_LOG_TRACE("CodecFeatureTest: frame %d", frameId);
 
             // Apply overrides for this frame
             const auto& frameOverride = GetFrameOverride(frameId);
@@ -535,7 +537,7 @@ protected:
     {
         // To speed up tests, disable session preloading
         m_managerParams.computeUnit = GetTestConfig().computeUnit;
-        m_managerParams.enableSessionPreloading = false;
+        m_managerParams.sessionPreloadMode = SessionPreloadMode::NONE;
         m_managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
     }
 
@@ -1185,6 +1187,68 @@ TEST_F(CodecFeatureTests, Decoder_RecoveryAfterError)
     ASSERT_TRUE(pFrame2);
     auto normalResult = decoder.value().Decode(pFrame2.value().bitStream);
     EXPECT_TRUE(normalResult) << "Normal decode should work: " << normalResult.error().message();
+}
+
+TEST_F(CodecFeatureTests, Decoder_PayloadTooShortForEntropyDecoder)
+{
+    auto manager = CreateManager();
+    ASSERT_TRUE(manager);
+
+    std::optional<MlvcEncoder> encoder;
+    ASSERT_NO_FATAL_FAILURE(SetupEncoder(*manager, encoder));
+
+    auto frame = MakeDummyFrame();
+    auto idrResult = encoder->Encode(frame.View(), {});
+    ASSERT_TRUE(idrResult);
+    const std::vector<std::byte> idrBitstream(idrResult.value().bitStream.begin(), idrResult.value().bitStream.end());
+    auto pResult = encoder->Encode(frame.View(), {});
+    ASSERT_TRUE(pResult);
+    const std::vector<std::byte> pBitstream(pResult.value().bitStream.begin(), pResult.value().bitStream.end());
+
+    NaluParser idrParser;
+    idrParser.Open(idrBitstream);
+    const auto sps = idrParser.ReadSps();
+    ASSERT_TRUE(sps);
+    const auto pps = idrParser.ReadPps();
+    ASSERT_TRUE(pps);
+    const auto idrFrame = idrParser.ReadFrame(sps.value());
+    ASSERT_TRUE(idrFrame);
+    NaluParser pParser;
+    pParser.Open(pBitstream);
+    const auto pFrame = pParser.ReadFrame(sps.value());
+    ASSERT_TRUE(pFrame);
+
+    // The padding stays unread in the entropy decoder stream after the IDR frame
+    std::vector<std::byte> paddedPayload(idrFrame.value().payload.begin(), idrFrame.value().payload.end());
+    uint32_t random = 1;
+    for (int i = 0; i < (1 << 16); i++) {
+        random = random * 1664525 + 1013904223;
+        paddedPayload.push_back(static_cast<std::byte>(random >> 24));
+    }
+    FrameNalu paddedIdr = idrFrame.value();
+    paddedIdr.payload = paddedPayload;
+    NaluBuilder idrBuilder;
+    idrBuilder.AppendSps(sps.value());
+    idrBuilder.AppendPps(pps.value());
+    idrBuilder.AppendFrame(sps.value(), paddedIdr);
+
+    auto decoder = manager->CreateDecoder();
+    ASSERT_TRUE(decoder);
+
+    // A payload shorter than the decoder state must fail, not decode the previous frame's stream
+    for (size_t payloadSize = 0; payloadSize < sizeof(uint32_t); payloadSize++) {
+        SCOPED_TRACE(payloadSize);
+        auto idrDecoded = decoder.value().Decode(idrBuilder.GetOutput());
+        ASSERT_TRUE(idrDecoded) << idrDecoded.error().message();
+
+        FrameNalu shortP = pFrame.value();
+        shortP.payload = pFrame.value().payload.first(payloadSize);
+        NaluBuilder pBuilder;
+        pBuilder.AppendFrame(sps.value(), shortP);
+        auto result = decoder.value().Decode(pBuilder.GetOutput());
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error(), make_error_code(Error::entropy_coder_decode_error));
+    }
 }
 
 TEST_F(CodecFeatureTests, Encoder_InvalidResolution)

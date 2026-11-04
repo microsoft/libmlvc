@@ -20,6 +20,7 @@ constexpr auto CPU_SERIES_M2 = "M2";
 constexpr auto CPU_SERIES_M3 = "M3";
 constexpr auto CPU_SERIES_M4 = "M4";
 constexpr auto CPU_SERIES_M5 = "M5";
+constexpr auto CPU_SERIES_A18 = "A18";
 
 constexpr auto CPU_SERIES_ALDER_LAKE = "Alder Lake";
 constexpr auto CPU_SERIES_RAPTOR_LAKE = "Raptor Lake";

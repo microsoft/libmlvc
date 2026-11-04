@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 
@@ -21,7 +22,7 @@ protected:
         // To speed up tests, disable session preloading
         ManagerParams managerParams;
         managerParams.computeUnit = GetTestConfig().computeUnit;
-        managerParams.enableSessionPreloading = false;
+        managerParams.sessionPreloadMode = SessionPreloadMode::NONE;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
 
         auto manager =
@@ -48,6 +49,8 @@ protected:
 
         auto summary = ComputeValidationSummary(testMetrics.value(), anchorMetrics.value());
         ASSERT_TRUE(summary) << "Failed to compute validation summary";
+        std::fprintf(stderr, "%s: BD-rate %.2f%% (threshold %.1f%%)\n", datasetName.c_str(), summary.value().bdRate,
+                     bdRateThreshold);
 
         ASSERT_FALSE(std::isnan(summary.value().bdRate)) << "BD-rate is NaN";
         EXPECT_LT(summary.value().bdRate, bdRateThreshold)

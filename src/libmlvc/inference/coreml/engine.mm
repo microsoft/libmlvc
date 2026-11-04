@@ -194,8 +194,6 @@ struct CompiledModel {
     CompiledModelOrigin origin;
 };
 
-// Extract TAR model data, write .mlpackage to temp dir, compile, clean up temp dir.
-// Returns the compiled .mlmodelc URL (in OS temp location).
 expected<CompiledModel> CompileModelFromData(const std::string& name, std::span<const std::byte> modelData)
 {
     if (modelData.empty()) {
@@ -249,6 +247,7 @@ expected<CompiledModel> CompileModelFromData(const std::string& name, std::span<
         }
     }
     error = nil;
+    // Core ML returns a separate temporary directory; the caller must move or delete it.
     NSURL* compiled = [MLModel compileModelAtURL:[NSURL fileURLWithPath:pkgPath] error:&error];
     if (error || !compiled) {
         MLVC_LOG_ERROR("[%s] Failed to compile: %s", name.c_str(), error.localizedDescription.UTF8String ?: "unknown");
@@ -257,69 +256,47 @@ expected<CompiledModel> CompileModelFromData(const std::string& name, std::span<
     return CompiledModel{ compiled, CompiledModelOrigin::CompiledToTemp };
 }
 
-// Returns the compiled model from the cache, or compiles it into the cache (into a temp directory without a cache key).
-// forceCompile replaces a cached model.
 expected<CompiledModel> GetOrCompileModel(const std::string& name, std::span<const std::byte> modelData,
-                                          std::string_view cacheKey, bool forceCompile = false)
+                                          const ModelCache* cache, std::string_view cacheKey)
 {
-    const bool useCache = !cacheKey.empty();
-    if (!useCache) {
+    if (!cache || cacheKey.empty()) {
         MLVC_LOG_INFO("[%s] Model caching disabled, compiling to temp directory", name.c_str());
         return CompileModelFromData(name, modelData);
     }
 
-    auto& cache = ModelCache::Instance();
-    NSFileManager* fm = [NSFileManager defaultManager];
-
-    // 1. Try to load from existing cache, unless forced to compile
-    if (auto cacheDirResult = cache.LocateCacheDir(cacheKey); cacheDirResult && !forceCompile) {
-        auto cachedModelPath = cacheDirResult.value() / "model.mlmodelc";
-        NSString* cachedPath = ToNSString(cachedModelPath.string());
-        BOOL isDir = NO;
-        if ([fm fileExistsAtPath:cachedPath isDirectory:&isDir] && isDir) {
-            MLVC_LOG_INFO("[%s] Found compiled model from cache '%s'", name.c_str(), std::string(cacheKey).c_str());
-            cache.CleanupCacheDirs();
-            return CompiledModel{ [NSURL fileURLWithPath:cachedPath], CompiledModelOrigin::Cache };
+    // Core ML compiles into a temp directory, from which the model moves into the staging directory
+    bool compiled = false;
+    const auto compile = [&](const std::filesystem::path& dir) -> expected<void> {
+        auto compiledModel = CompileModelFromData(name, modelData);
+        if (!compiledModel) {
+            MLVC_LOG_ERROR("[%s] Cache compilation failed: %s:%d (%s)", name.c_str(),
+                           compiledModel.error().category().name(), compiledModel.error().value(),
+                           compiledModel.error().message().c_str());
+            return make_error_code(Error::model_compile_error);
         }
-        // Cache dir exists but model.mlmodelc is missing: recompiled below into a new cache directory
-        MLVC_LOG_WARN("[%s] Cache directory exists but compiled model missing, recompiling", name.c_str());
-    }
-
-    if (modelData.empty()) {
-        MLVC_LOG_ERROR("[%s] Compiled model '%s' not found in the model cache", name.c_str(),
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSURL* destURL = [NSURL fileURLWithPath:ToNSString((dir / "model.mlmodelc").string())];
+        NSError* error = nil;
+        if (![fm moveItemAtURL:compiledModel->url toURL:destURL error:&error]) {
+            MLVC_LOG_ERROR("[%s] Failed to move compiled model to cache: %s:%ld (%s)", name.c_str(),
+                           error.domain.UTF8String ?: "unknown", static_cast<long>(error.code),
+                           error.localizedDescription.UTF8String ?: "unknown");
+            [fm removeItemAtURL:compiledModel->url error:nil];
+            return make_error_code(Error::model_cache_error);
+        }
+        compiled = true;
+        return {};
+    };
+    auto entryDir = modelData.empty() ? cache->Get(cacheKey) : cache->GetOrCreate(cacheKey, compile);
+    if (!entryDir) {
+        MLVC_LOG_ERROR("[%s] No usable compiled model '%s' in the model cache", name.c_str(),
                        std::string(cacheKey).c_str());
-        return make_error_code(Error::model_init_error);
+        return entryDir.error();
     }
-
-    // 2. Compile model
-    auto compiled = CompileModelFromData(name, modelData);
-    if (!compiled) return compiled.error();
-
-    // 3. Move compiled model into cache directory
-    auto cacheDirResult = cache.CreateCacheDir(cacheKey);
-    if (!cacheDirResult) {
-        MLVC_LOG_ERROR("[%s] Failed to create cache directory", name.c_str());
-        [fm removeItemAtURL:compiled->url error:nil];
-        return cacheDirResult.error();
-    }
-
-    auto destPath = cacheDirResult.value() / "model.mlmodelc";
-    NSURL* destURL = [NSURL fileURLWithPath:ToNSString(destPath.string())];
-    NSError* error = nil;
-    if (![fm moveItemAtURL:compiled->url toURL:destURL error:&error]) {
-        MLVC_LOG_ERROR("[%s] Failed to move compiled model to cache: %s", name.c_str(),
-                       error.localizedDescription.UTF8String ?: "unknown");
-        cache.DeleteCacheDir(cacheKey);
-        [fm removeItemAtURL:compiled->url error:nil];
-        return make_error_code(Error::io_error);
-    }
-
-    MLVC_LOG_INFO("[%s] Compiled model cache key: '%s'", name.c_str(), std::string(cacheKey).c_str());
-    cache.CleanupCacheDirs();
-    return CompiledModel{ destURL, CompiledModelOrigin::CompiledToCache };
+    NSURL* url = [NSURL fileURLWithPath:ToNSString((entryDir.value() / "model.mlmodelc").string())];
+    return CompiledModel{ url, compiled ? CompiledModelOrigin::CompiledToCache : CompiledModelOrigin::Cache };
 }
 
-// Returns a retained model
 expected<MLModel*> LoadModel(const std::string& name, NSURL* compiledModelUrl, const CoreMlEngineParams& params,
                              const std::optional<std::string>& functionName)
 {
@@ -338,6 +315,7 @@ expected<MLModel*> LoadModel(const std::string& name, NSURL* compiledModelUrl, c
                            error.localizedDescription.UTF8String ?: "unknown");
             return make_error_code(Error::model_init_error);
         }
+        // The returned model must outlive this autorelease pool.
         return [model retain];
     }
 }
@@ -588,8 +566,6 @@ private:
         std::vector<int> shape;
     };
 
-    // Model metadata extraction
-
     expected<void> ExtractModelMetadata()
     {
         auto extract = [](NSDictionary<NSString*, MLFeatureDescription*>* descs, std::vector<std::string>& names,
@@ -608,8 +584,6 @@ private:
         if (auto r = extract(desc.outputDescriptionsByName, m_outputNames, m_outputInfo); !r) return r.error();
         return {};
     }
-
-    // Session initialization
 
     expected<void> Initialize(const CompiledModel& compiledModel, const CoreMlEngineParams& params,
                               const std::optional<std::string>& functionName)
@@ -655,6 +629,7 @@ public:
                       ComputeUnitToString(m_info.computeUnit), platformInfo.osVersion.major, osBuild.c_str(),
                       m_envHash.c_str());
     }
+
     expected<InferenceSessionPtr> CreateSession(std::string_view name, std::span<const std::byte> modelData,
                                                 const std::map<std::string, std::span<const std::byte>>& weightsData,
                                                 std::string_view cacheKey,
@@ -669,33 +644,39 @@ public:
         // Ensure the same model is not being compiled concurrently.
         std::lock_guard<std::mutex> lock(m_mutex);
         @autoreleasepool {
-            auto compiled = GetOrCompileModel(std::string(name), modelData, fullCacheKey);
-            if (!compiled) return compiled.error();
-            auto session = CoreMlInferenceSession::Create(name, compiled.value(), m_params, functionName);
-
-            // A cached model that fails to load is recompiled once if there is model data
-            if (!session && compiled->origin == CompiledModelOrigin::Cache && !modelData.empty()) {
-                MLVC_LOG_WARN("[%s] Failed to load from cache, recompiling", std::string(name).c_str());
-                compiled = GetOrCompileModel(std::string(name), modelData, fullCacheKey, /*forceCompile=*/true);
-                if (!compiled) {
-                    // The cached model doesn't load and can't be replaced: delete it
-                    ModelCache::Instance().DeleteCacheDir(fullCacheKey);
-                    return compiled.error();
-                }
-                session = CoreMlInferenceSession::Create(name, compiled.value(), m_params, functionName);
+            auto compiled = GetOrCompileModel(std::string(name), modelData, m_params.modelCache.get(), fullCacheKey);
+            if (!compiled) {
+                return compiled.error();
             }
+            auto session = CoreMlInferenceSession::Create(name, compiled.value(), m_params, functionName);
             if (!session) {
-                // A freshly compiled model that fails to load is deleted, not compiled again
-                if (compiled->origin == CompiledModelOrigin::CompiledToCache) {
-                    MLVC_LOG_ERROR("[%s] Failed to load the freshly compiled model, deleting it",
-                                   std::string(name).c_str());
-                    ModelCache::Instance().DeleteCacheDir(fullCacheKey);
+                if (compiled->origin != CompiledModelOrigin::CompiledToTemp) {
+                    MLVC_LOG_ERROR("[%.*s] Cached-model session initialization failed: %s:%d (%s)",
+                                   static_cast<int>(name.size()), name.data(), session.error().category().name(),
+                                   session.error().value(), session.error().message().c_str());
+                    return make_error_code(Error::model_cache_load_error);
                 }
                 return session.error();
             }
             return InferenceSessionPtr(session.value());
         }
     }
+
+    expected<void> ValidateModelCache(std::string_view cacheKey) const override
+    {
+        if (!m_params.modelCache) {
+            return {};
+        }
+        if (cacheKey.empty()) {
+            MLVC_LOG_ERROR("Model cache key is required");
+            return make_error_code(Error::invalid_argument);
+        }
+        if (auto entry = m_params.modelCache->Get(FullCacheKey(cacheKey)); !entry) {
+            return entry.error();
+        }
+        return {};
+    }
+
     expected<bool> PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
                                      const std::map<std::string, std::span<const std::byte>>& weightsData,
                                      std::string_view cacheKey) override
@@ -708,13 +689,18 @@ public:
             MLVC_LOG_ERROR("[%s] Model data and cache key are required", std::string(name).c_str());
             return make_error_code(Error::invalid_argument);
         }
+        if (!m_params.modelCache) {
+            return false;
+        }
 
         const auto fullCacheKey = FullCacheKey(cacheKey);
         // Ensure the same model is not being compiled concurrently.
         std::lock_guard<std::mutex> lock(m_mutex);
         @autoreleasepool {
-            auto compiled = GetOrCompileModel(std::string(name), modelData, fullCacheKey);
-            if (!compiled) return compiled.error();
+            auto compiled = GetOrCompileModel(std::string(name), modelData, m_params.modelCache.get(), fullCacheKey);
+            if (!compiled) {
+                return compiled.error();
+            }
             // Best effort: sessions specialize the model themselves when created
             if (compiled->origin == CompiledModelOrigin::CompiledToCache
                 && !SpecializeModel(std::string(name), compiled->url, m_params)) {
@@ -723,6 +709,7 @@ public:
             return true;
         }
     }
+
     const InferenceEngineInfo& GetInfo() const override { return m_info; }
 
 private:

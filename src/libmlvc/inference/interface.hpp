@@ -78,17 +78,18 @@ class IInferenceEngine {
 public:
     virtual ~IInferenceEngine() = default;
     // Creates an inference session for the model.
-    // With a cacheKey, loads the compiled model from the model cache, or compiles it and stores it there.
-    // A cached model that fails to load is recompiled once if modelData is set (and deleted if that fails too);
-    // without modelData it is kept, as the failure may be transient, and an error is returned.
-    // Empty modelData requires the model to be cached; without a cacheKey or cache support it is invalid_argument.
+    // With a cacheKey, an engine that caches models (it has a model cache and a device that supports caching) loads the
+    // model only from the cache, compiling it there first if it is missing and modelData is set. A cached model that
+    // fails to load is never deleted or recompiled. Other engines ignore cacheKey.
+    // Empty modelData requires a cached model: without a cacheKey or model caching, it is invalid_argument.
     virtual expected<InferenceSessionPtr>
     CreateSession(std::string_view name, std::span<const std::byte> modelData,
                   const std::map<std::string, std::span<const std::byte>>& weightsData, std::string_view cacheKey,
                   const std::optional<std::string>& functionName = std::nullopt) = 0;
+    virtual expected<void> ValidateModelCache(std::string_view cacheKey) const = 0;
     // Compiles the model into the model cache for later CreateSession() calls with the same cacheKey.
-    // Skips compilation if the model is already cached.
-    // Returns true if the model is cached, false if the engine doesn't support caching.
+    // Skips compilation if the model is already cached; a cached model is never replaced.
+    // Returns true if the model is cached, false if the engine doesn't cache models.
     virtual expected<bool> PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
                                              const std::map<std::string, std::span<const std::byte>>& weightsData,
                                              std::string_view cacheKey) = 0;

@@ -22,9 +22,9 @@ Validated NPU configurations:
 
 | Platform | Minimum OS | Target NPU | Minimum NPU driver |
 |---|---|---|---|
-| Windows x64 | Windows 11 24H2 (build 26100) | Intel NPU (Lunar Lake or Panther Lake) | Lunar Lake: `32.0.100.4297`; Panther Lake: `32.0.100.4621` |
+| Windows x64 | Windows 11 24H2 (build 26100) | Intel NPU (Lunar Lake or Panther Lake) | Lunar Lake: `32.0.100.4023`; Panther Lake: `32.0.100.4621` |
 | Windows ARM64 | Windows 11 24H2 (build 26100) | Qualcomm Snapdragon X1 NPU | `30.0.140.1000` |
-| macOS ARM64 | macOS 15 | Apple Neural Engine (M1-M5) | N/A |
+| macOS ARM64 | macOS 15 | Apple Neural Engine (M1-M5, A18 Pro) | N/A |
 
 ## Command-line usage
 
@@ -121,10 +121,10 @@ By default, a benchmark runs for 20 seconds using the included 960x540 test clip
 average FPS and timing statistics for each stream. Unless `--target-fps` is set, each stream runs as
 fast as possible.
 
-To benchmark another raw video clip, set `--input`, `--input-width`, and `--input-height`. Adjust the
+To benchmark another raw video clip, set `--input <file>:<width>x<height>`. Adjust the
 duration of each iteration with `--duration-seconds`, and increase `--num-encoders` or
 `--num-decoders` to evaluate more concurrent streams. Pass `--profile` to also report the time, CPU time,
-and memory of each start-up and run phase.
+and memory of each start-up and run phase. For other options, run `mlvc benchmark --help`.
 
 ## C++ library usage
 
@@ -290,6 +290,7 @@ Windows ARM64 or `mac-arm64` on macOS ARM64.
 - [Bitstream and compatibility specification](docs/specification.md)
 - [Test design](docs/test-design.md)
 - [LTR design](docs/ltr-design.md)
+- [Model cache design](docs/model-cache-design.md)
 - [Benchmarks](docs/benchmarks.md)
 
 ## Acknowledgments

@@ -93,7 +93,6 @@ static expected<void> CheckMinEpVersion(OnnxExecutionProvider onnxExecutionProvi
     return {};
 }
 
-// Convert a uint32 to a hex string (e.g., 0x8086 -> "8086").
 static std::string Uint32ToHexTag(uint32_t value)
 {
     if (value == 0) return std::string();
@@ -102,7 +101,6 @@ static std::string Uint32ToHexTag(uint32_t value)
     return hex;
 }
 
-// Look up a value by key in ORT key-value pairs. Returns nullptr if not found.
 static const char* FindOrtKvpValue(const OrtApi* ortApi, const OrtKeyValuePairs* kvps, const char* key)
 {
     if (!kvps) return nullptr;
@@ -127,9 +125,6 @@ static std::string Fnv1a32(std::string_view s)
     return buf;
 }
 
-// Compute a short hash for EP context cache keys from the backend, compute unit,
-// EP, EP package version, and (except for OpenVINO) driver version.
-// OpenVINO ships its NPU compiler with the EP, so driver updates do not invalidate its cache.
 static std::string ComputeEngineEnvHash(const InferenceEngineInfo& config)
 {
     std::string fingerprint;
@@ -140,6 +135,7 @@ static std::string ComputeEngineEnvHash(const InferenceEngineInfo& config)
     fingerprint += OnnxExecutionProviderToString(config.onnxExecutionProvider);
     fingerprint += '|';
     fingerprint += config.windowsAppRuntimeEpVersion;
+    // OpenVINO ships its NPU compiler with the EP, so driver updates do not invalidate its cache.
     if (config.onnxExecutionProvider != OnnxExecutionProvider::OPENVINO) {
         fingerprint += '|';
         fingerprint += config.driverVersion;
@@ -158,7 +154,7 @@ static expected<void> AddExternalWeightsToSessionOptions(const OrtApi* ortApi, O
         return {};
     }
 
-    MLVC_LOG_DEBUG("Adding %zu external initializers from files in memory", weightsData.size());
+    MLVC_LOG_TRACE("Adding %zu external initializers from files in memory", weightsData.size());
 
     // ORT copies names and lengths by value, and stores raw buffer pointers (char*) into session options.
     // The buffer pointers reference the caller's weightsData spans, which must stay alive through session creation.
@@ -182,7 +178,7 @@ static expected<void> AddExternalWeightsToSessionOptions(const OrtApi* ortApi, O
         return make_error_code(Error::model_init_error);
     }
 
-    MLVC_LOG_DEBUG("Successfully added %zu external initializers from files in memory", weightsData.size());
+    MLVC_LOG_TRACE("Successfully added %zu external initializers from files in memory", weightsData.size());
     return {};
 }
 
@@ -232,7 +228,7 @@ expected<void> WinMlInferenceEngine::Initialize(CancelToken cancelToken, const I
         return make_error_code(Error::model_init_error);
     }
     const auto winAppRuntimeVersion = GetWindowsAppRuntimeVersion(m_params.initMode);
-    MLVC_LOG_DEBUG("Windows App Runtime v%s, ONNX Runtime v%s",
+    MLVC_LOG_TRACE("Windows App Runtime v%s, ONNX Runtime v%s",
                    winAppRuntimeVersion.empty() ? "N/A" : winAppRuntimeVersion.c_str(), ortVersion ? ortVersion : "N/A");
 
     // Emit Windows App Runtime version discovery event
@@ -466,16 +462,31 @@ WinMlInferenceEngine::CreateSession(std::string_view name, std::span<const std::
         globalLock.lock();
     }
 
-    // 2. Load from the EP context cache, compiling the model into it if not cached
-    if (!cacheKey.empty() && SupportsEpContextCaching()) {
+    // 2. Load the compiled model from the model cache, compiling it into the cache first if it isn't there
+    if (!cacheKey.empty() && UsesModelCache()) {
         const auto fullCacheKey = FullCacheKey(cacheKey);
-        MLVC_LOG_DEBUG("EP context caching enabled for model '%.*s' with key '%s'", static_cast<int>(name.size()),
+        MLVC_LOG_TRACE("EP context caching enabled for model '%.*s' with key '%s'", static_cast<int>(name.size()),
                        name.data(), fullCacheKey.c_str());
         return CreateSessionFromCache(name, modelData, weightsData, fullCacheKey);
     }
 
     // 3. Otherwise create the session from the model in memory
     return CreateSessionFromArray(name, modelData, weightsData);
+}
+
+expected<void> WinMlInferenceEngine::ValidateModelCache(std::string_view cacheKey) const
+{
+    if (!UsesModelCache()) {
+        return {};
+    }
+    if (cacheKey.empty()) {
+        MLVC_LOG_ERROR("Model cache key is required");
+        return make_error_code(Error::invalid_argument);
+    }
+    if (auto entry = m_params.modelCache->Get(FullCacheKey(cacheKey)); !entry) {
+        return entry.error();
+    }
+    return {};
 }
 
 expected<bool> WinMlInferenceEngine::PrepareModelCache(std::string_view name, std::span<const std::byte> modelData,
@@ -486,34 +497,20 @@ expected<bool> WinMlInferenceEngine::PrepareModelCache(std::string_view name, st
         MLVC_LOG_ERROR("[%.*s] Model data and cache key are required", static_cast<int>(name.size()), name.data());
         return make_error_code(Error::invalid_argument);
     }
-    if (!SupportsEpContextCaching()) {
+    if (!UsesModelCache()) {
         return false;
     }
 
     std::lock_guard lock(m_mutex);
-
-    auto& cache = libmlvc::ModelCache::Instance();
-    const auto fullCacheKey = FullCacheKey(cacheKey);
-
-    // 1. Skip compilation if the model is already cached
-    std::error_code ec;
-    if (auto cacheDirResult = cache.LocateCacheDir(fullCacheKey);
-        cacheDirResult && std::filesystem::is_regular_file(cacheDirResult.value() / kCachedModelFilename, ec)) {
-        return true;
-    }
-
-    // 2. Create an empty cache directory and compile the model into it
-    auto cacheDirResult = cache.CreateCacheDir(fullCacheKey);
-    if (!cacheDirResult) return cacheDirResult.error();
-    const auto modelPath = cacheDirResult.value() / kCachedModelFilename;
     std::lock_guard globalLock(g_ortCreateSessionMutex);  // Creating sessions with non-CPU EPs is not thread-safe
-    if (auto ret = CompileModelToEpContext(name, modelData, weightsData, modelPath); !ret) {
-        cache.DeleteCacheDir(fullCacheKey);
-        return ret.error();
+    auto entryDir = m_params.modelCache->GetOrCreate(FullCacheKey(cacheKey), [&](const std::filesystem::path& dir) {
+        return CompileModelToEpContext(name, modelData, weightsData, dir / kCachedModelFilename);
+    });
+    if (!entryDir) {
+        MLVC_LOG_ERROR("[%.*s] Failed to prepare the model cache: %s", static_cast<int>(name.size()), name.data(),
+                       entryDir.error().message().c_str());
+        return entryDir.error();
     }
-
-    // 3. Trigger cleanup
-    cache.CleanupCacheDirs();
     return true;
 }
 
@@ -585,7 +582,7 @@ expected<OrtSessionOptionsPtr> WinMlInferenceEngine::CreateConfiguredSessionOpti
             MLVC_LOG_ERROR("Failed to append %s execution provider: %s", ortProviderName, ret.error().c_str());
             return make_error_code(Error::model_init_error);
         }
-        MLVC_LOG_DEBUG("Successfully added %s execution provider using V2 API", ortProviderName);
+        MLVC_LOG_TRACE("Successfully added %s execution provider using V2 API", ortProviderName);
     }
     return sessionOptionsPtr;
 }
@@ -634,56 +631,27 @@ WinMlInferenceEngine::CreateSessionFromCache(std::string_view name, std::span<co
                                              const std::map<std::string, std::span<const std::byte>>& weightsData,
                                              std::string_view cacheKey)
 {
-    auto& cache = libmlvc::ModelCache::Instance();
-
-    // 1. Try to load from existing cache
-    std::error_code ec;
-    if (auto cacheDirResult = cache.LocateCacheDir(cacheKey);
-        cacheDirResult && std::filesystem::is_regular_file(cacheDirResult.value() / kCachedModelFilename, ec)) {
-        MLVC_LOG_INFO("[%.*s] Found cached EP context at '%s'", static_cast<int>(name.size()), name.data(),
-                      std::string(cacheKey).c_str());
-
-        auto sessionResult = CreateSessionFromDisk(name, cacheDirResult.value() / kCachedModelFilename);
-        if (sessionResult) {
-            cache.CleanupCacheDirs();  // Trigger cleanup after successful load
-            MLVC_LOG_INFO("[%.*s] Successfully loaded session from EP context cache", static_cast<int>(name.size()),
-                          name.data());
-            return sessionResult;
-        }
-        if (modelData.empty()) {
-            MLVC_LOG_ERROR("[%.*s] Failed to load from cache", static_cast<int>(name.size()), name.data());
-            return sessionResult.error();
-        }
-        MLVC_LOG_WARN("[%.*s] Failed to load from cache, recompiling", static_cast<int>(name.size()), name.data());
-    } else if (modelData.empty()) {
-        MLVC_LOG_ERROR("[%.*s] No EP context '%s' in the model cache", static_cast<int>(name.size()), name.data(),
-                       std::string(cacheKey).c_str());
-        return make_error_code(Error::model_init_error);
+    const auto compile = [&](const std::filesystem::path& dir) {
+        return CompileModelToEpContext(name, modelData, weightsData, dir / kCachedModelFilename);
+    };
+    auto entryDir =
+        modelData.empty() ? m_params.modelCache->Get(cacheKey) : m_params.modelCache->GetOrCreate(cacheKey, compile);
+    if (!entryDir) {
+        MLVC_LOG_ERROR("[%.*s] No usable EP context '%s' in the model cache", static_cast<int>(name.size()),
+                       name.data(), std::string(cacheKey).c_str());
+        return entryDir.error();
     }
 
-    // 2. Create cache directory and compile model to EP context
-    auto cacheDirResult = cache.CreateCacheDir(cacheKey);
-    if (!cacheDirResult) return cacheDirResult.error();
-    const auto modelPath = cacheDirResult.value() / kCachedModelFilename;
-    if (auto ret = CompileModelToEpContext(name, modelData, weightsData, modelPath); !ret) {
-        cache.DeleteCacheDir(cacheKey);
-        return ret.error();
+    auto session = CreateSessionFromDisk(name, entryDir.value() / kCachedModelFilename);
+    if (!session) {
+        MLVC_LOG_ERROR("[%.*s] Failed to load the EP context '%s' from the model cache: %s:%d (%s)",
+                       static_cast<int>(name.size()), name.data(), std::string(cacheKey).c_str(),
+                       session.error().category().name(), session.error().value(), session.error().message().c_str());
+        return make_error_code(Error::model_cache_load_error);
     }
-
-    // 3. Load from freshly created cache
-    auto sessionResult = CreateSessionFromDisk(name, modelPath);
-    if (!sessionResult) {
-        MLVC_LOG_ERROR("[%.*s] Failed to load from freshly compiled cache", static_cast<int>(name.size()), name.data());
-        cache.DeleteCacheDir(cacheKey);
-        return sessionResult.error();
-    }
-
-    // 4. Trigger cleanup
-    cache.CleanupCacheDirs();
-
-    MLVC_LOG_INFO("[%.*s] Successfully created session from EP context, cache key '%s'", static_cast<int>(name.size()),
-                  name.data(), std::string(cacheKey).c_str());
-    return sessionResult;
+    MLVC_LOG_INFO("[%.*s] Loaded session from EP context cache '%s'", static_cast<int>(name.size()), name.data(),
+                  std::string(cacheKey).c_str());
+    return session;
 }
 
 expected<InferenceSessionPtr> WinMlInferenceEngine::CreateSessionFromDisk(std::string_view name,
@@ -697,7 +665,7 @@ expected<InferenceSessionPtr> WinMlInferenceEngine::CreateSessionFromDisk(std::s
 
     // Load by file path so the EP can resolve relative auxiliary files (e.g., OpenVINO .blob files).
     std::wstring modelPathW = modelPath.wstring();
-    MLVC_LOG_DEBUG("[%.*s] Creating ORT session from file '%s'", static_cast<int>(name.size()), name.data(),
+    MLVC_LOG_TRACE("[%.*s] Creating ORT session from file '%s'", static_cast<int>(name.size()), name.data(),
                    (modelPath.parent_path().filename() / modelPath.filename()).string().c_str());
 
     OrtSession* session = nullptr;
@@ -723,7 +691,10 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
 {
     auto sessionOptionsResult = CreateConfiguredSessionOptions();
     if (!sessionOptionsResult) {
-        return sessionOptionsResult.error();
+        MLVC_LOG_ERROR("[%.*s] Failed to configure EP context compilation: %s:%d (%s)", static_cast<int>(name.size()),
+                       name.data(), sessionOptionsResult.error().category().name(),
+                       sessionOptionsResult.error().value(), sessionOptionsResult.error().message().c_str());
+        return make_error_code(Error::model_compile_error);
     }
     auto sessionOptionsPtr = std::move(sessionOptionsResult.value());
 
@@ -736,7 +707,7 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
             CheckOrtStatus(m_ortApi, m_ortApi->AddSessionConfigEntry(sessionOptionsPtr.get(), "ep.context_enable", "1"));
         !ret) {
         MLVC_LOG_ERROR("Failed to enable EP context: %s", ret.error().c_str());
-        return make_error_code(Error::model_init_error);
+        return make_error_code(Error::model_compile_error);
     }
 
     // Set embed mode to 0 (external file, not embedded in ONNX)
@@ -744,7 +715,7 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
             m_ortApi, m_ortApi->AddSessionConfigEntry(sessionOptionsPtr.get(), "ep.context_embed_mode", "0"));
         !ret) {
         MLVC_LOG_ERROR("Failed to set EP context embed mode: %s", ret.error().c_str());
-        return make_error_code(Error::model_init_error);
+        return make_error_code(Error::model_compile_error);
     }
 
     // Set the output file path for the EP context
@@ -752,12 +723,14 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
                                                 sessionOptionsPtr.get(), "ep.context_file_path", contextFilePath.c_str()));
         !ret) {
         MLVC_LOG_ERROR("Failed to set EP context file path: %s", ret.error().c_str());
-        return make_error_code(Error::model_init_error);
+        return make_error_code(Error::model_compile_error);
     }
 
     // Add external weights if provided
     if (auto ret = AddExternalWeightsToSessionOptions(m_ortApi, sessionOptionsPtr.get(), weightsData); !ret) {
-        return ret.error();
+        MLVC_LOG_ERROR("[%.*s] Failed to add weights for EP context compilation: %s:%d (%s)", static_cast<int>(name.size()),
+                       name.data(), ret.error().category().name(), ret.error().value(), ret.error().message().c_str());
+        return make_error_code(Error::model_compile_error);
     }
 
     // Create session - this will compile and save the EP context
@@ -769,7 +742,7 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
         !ret) {
         MLVC_LOG_ERROR("[%.*s] EP context compilation failed: %s", static_cast<int>(name.size()), name.data(),
                        ret.error().c_str());
-        return make_error_code(Error::model_init_error);
+        return make_error_code(Error::model_compile_error);
     }
 
     // Release the compilation session
@@ -778,17 +751,21 @@ expected<void> WinMlInferenceEngine::CompileModelToEpContext(std::string_view na
     // Verify the cache file was created
     std::error_code ec;
     if (!std::filesystem::is_regular_file(modelPath, ec)) {
-        MLVC_LOG_ERROR("EP context file was not created at expected path");
-        return make_error_code(Error::model_init_error);
+        if (!ec) {
+            ec = std::make_error_code(std::errc::no_such_file_or_directory);
+        }
+        MLVC_LOG_ERROR("EP context file was not created at expected path: %s:%d (%s)", ec.category().name(), ec.value(),
+                       ec.message().c_str());
+        return make_error_code(Error::model_compile_error);
     }
 
-    MLVC_LOG_DEBUG("[%.*s] EP context compiled successfully", static_cast<int>(name.size()), name.data());
+    MLVC_LOG_INFO("[%.*s] EP context compiled successfully", static_cast<int>(name.size()), name.data());
     return {};
 }
 
-bool WinMlInferenceEngine::SupportsEpContextCaching() const
+bool WinMlInferenceEngine::UsesModelCache() const
 {
-    if (m_hwDeviceType != OrtHardwareDeviceType_NPU) {
+    if (!m_params.modelCache || m_hwDeviceType != OrtHardwareDeviceType_NPU) {
         return false;
     }
     return m_params.onnxExecutionProvider == OnnxExecutionProvider::OPENVINO

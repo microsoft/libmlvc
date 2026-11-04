@@ -13,6 +13,7 @@
 #include "libmlvc_support/video_io.hpp"
 #include <libmlvc/libmlvc.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -57,7 +59,7 @@ expected<MlvcManager> CreateManager(const CommonArguments& args, InitializeProgr
         .computeUnit = args.computeUnit,
         .cacheDir = args.cacheDir,
         .enableModelCache = args.enableModelCache,
-        .enableSessionPreloading = args.enableSessionPreloading,
+        .sessionPreloadMode = args.sessionPreloadMode,
         .winmlInitMode = args.winmlInitMode,
     };
 
@@ -85,6 +87,63 @@ expected<MlvcManager> CreateManager(const CommonArguments& args, InitializeProgr
     PrintCapabilities(versions, capabilities);
 
     return manager;
+}
+
+expected<std::vector<Nv12Frame>> LoadInputFrames(const std::vector<InputClip>& inputs)
+{
+    constexpr size_t maxNumFramesPerInput = 128;
+    std::vector<Nv12Frame> frames;
+    for (const auto& input : inputs) {
+        auto clipFrames = LoadNv12Frames(input.path, { .rawFrameWidth = input.width, .rawFrameHeight = input.height },
+                                         maxNumFramesPerInput);
+        if (!clipFrames) {
+            std::cerr << "Error: Failed to read input " << input.path.string() << ": " << clipFrames.error().message()
+                      << '\n';
+            return clipFrames.error();
+        }
+        if (clipFrames->empty()) {
+            std::cerr << "Error: Input " << input.path.string() << " contains no complete frames.\n";
+            return make_error_code(Error::general_failure);
+        }
+        std::ranges::move(*clipFrames, std::back_inserter(frames));
+    }
+    return frames;
+}
+
+expected<std::vector<MlvcAccessUnit>> PreEncode(const MlvcManager& manager, const BenchmarkArguments& args,
+                                                const std::vector<Nv12Frame>& frames)
+{
+    auto encoderConfig = manager.GetDefaultEncoderConfig(args.mlvcVersion);
+    if (!encoderConfig) {
+        std::cerr << "Error: Failed to get default encoder config: " << encoderConfig.error().message() << '\n';
+        return encoderConfig.error();
+    }
+    encoderConfig->SetSize(frames.front().width, frames.front().height);
+    args.Apply(*encoderConfig);
+
+    auto encoder = manager.CreateEncoder(*encoderConfig);
+    if (!encoder) {
+        std::cerr << "Error: Failed to create pre-encode encoder: " << encoder.error().message() << '\n';
+        return encoder.error();
+    }
+
+    std::vector<MlvcAccessUnit> accessUnits;
+    accessUnits.reserve(frames.size());
+    for (const auto& frame : frames) {
+        encoderConfig->SetSize(frame.width, frame.height);
+        if (auto ret = encoder->Configure(*encoderConfig); !ret) {
+            std::cerr << "Error: Failed to configure pre-encode encoder: " << ret.error().message() << '\n';
+            return ret.error();
+        }
+        auto encodeRes = encoder->Encode(frame.View(), { .qp = args.qp });
+        if (!encodeRes) {
+            std::cerr << "Error: Failed to pre-encode frame: " << encodeRes.error().message() << '\n';
+            return encodeRes.error();
+        }
+        const auto& bitStream = encodeRes->bitStream;
+        accessUnits.push_back({ .data = std::vector(bitStream.begin(), bitStream.end()) });
+    }
+    return accessUnits;
 }
 
 }  // namespace
@@ -261,6 +320,7 @@ expected<void> RunDecode(const DecodeArguments& args)
 
 expected<void> RunBenchmark(const BenchmarkArguments& args)
 {
+    // Profiling phases, in the order they start
     constexpr struct {
         const char* start = "start";
         const char* engine = "engine";
@@ -271,6 +331,7 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
         const char* exit = "exit";
     } phases{};
 
+    // With --profile, sample the process metrics in the background
     std::unique_ptr<MetricsCollector> collector;
     if (args.profile) {
         collector = std::make_unique<MetricsCollector>();
@@ -291,8 +352,7 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
     record(phases.start, "Detecting platform");
     PrintRuntimeInfo();
 
-    // Load the input first, so that the runners start right after the waits
-    record(phases.start, "Loading input frames");
+    // Create the output directory and save the arguments in it
     const auto& outputDir = args.outputDirectory;
     std::error_code ec;
     if (!std::filesystem::exists(outputDir, ec)) {
@@ -303,24 +363,36 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
             return ec;
         }
     }
-
     args.Save(outputDir / "benchmark_args.json");
 
-    static constexpr size_t maxNumFrames = 128;
-
-    std::cerr << "Reading benchmark input frames...\n";
-    auto frames = LoadNv12Frames(args.inputFile,
-                                 { .rawFrameWidth = args.inputWidth, .rawFrameHeight = args.inputHeight }, maxNumFrames);
-    if (!frames) {
-        std::cerr << "Error: Failed to read input frames: " << frames.error().message() << '\n';
-        return frames.error();
+    // Load the input first, so that the runners start right after the waits. Encoders encode the input frames;
+    // decoders decode them pre-encoded, unless given their own input.
+    record(phases.start, "Loading input frames");
+    const bool preEncode = args.numDecoders > 0 && args.decoderInputFile.empty();
+    std::vector<Nv12Frame> inputFrames;
+    if (args.numEncoders > 0 || preEncode) {
+        std::cerr << "Reading benchmark input frames...\n";
+        auto frames = LoadInputFrames(args.inputs);
+        if (!frames) return frames.error();
+        inputFrames = std::move(frames.value());
     }
-    if (frames->empty()) {
-        std::cerr << "Error: Input contains no complete frames.\n";
-        return make_error_code(Error::general_failure);
-    }
-    auto inputFrames = std::move(frames.value());
 
+    std::vector<MlvcAccessUnit> decoderInputAccessUnits;
+    if (!args.decoderInputFile.empty()) {
+        std::cerr << "Reading decoder input access units...\n";
+        auto accessUnits = ReadMlvcAccessUnits(args.decoderInputFile);
+        if (!accessUnits) {
+            std::cerr << "Error: Failed to read decoder input: " << accessUnits.error().message() << '\n';
+            return accessUnits.error();
+        }
+        if (accessUnits->empty()) {
+            std::cerr << "Error: Decoder input contains no access units.\n";
+            return make_error_code(Error::general_failure);
+        }
+        decoderInputAccessUnits = std::move(accessUnits.value());
+    }
+
+    // Start up the inference engine and load the model bundles
     record(phases.engine, "Creating manager");
     std::atomic<bool> mlvcStarted = false;
     auto managerResult = CreateManager(args, [&](const InitializeProgressEvent& event) {
@@ -337,44 +409,25 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
     std::optional<MlvcManager> manager = std::move(managerResult.value());
     waitAfter(args.waitSeconds, phases.mlvc, "start-up");
 
-    std::vector<MlvcAccessUnit> decoderInputAccessUnits;
-    if (args.numDecoders > 0) {
+    // Encode the decoder input before the benchmark, and save it for later runs if requested
+    if (preEncode) {
         record(phases.encode, "Pre-encoding decoder input");
         std::cerr << "Pre-encoding decoder input frames (qp=" << args.qp << ")...\n";
-        auto encoderConfig = manager->GetDefaultEncoderConfig(args.mlvcVersion);
-        if (!encoderConfig) {
-            std::cerr << "Error: Failed to get default encoder config: " << encoderConfig.error().message() << '\n';
-            return encoderConfig.error();
-        }
-        encoderConfig.value().SetSize(args.inputWidth, args.inputHeight);
-        args.Apply(encoderConfig.value());
-
-        auto encoder = manager->CreateEncoder(encoderConfig.value());
-        if (!encoder) {
-            std::cerr << "Error: Failed to create pre-encode encoder: " << encoder.error().message() << '\n';
-            return encoder.error();
-        }
-
-        decoderInputAccessUnits.reserve(inputFrames.size());
-        for (const auto& nv12Frame : inputFrames) {
-            const Nv12FrameView frameView{ nv12Frame.width, nv12Frame.height, nv12Frame.data };
-            auto encodeRes = encoder.value().Encode(frameView, { .qp = args.qp });
-            if (!encodeRes) {
-                std::cerr << "Error: Failed to pre-encode frame: " << encodeRes.error().message() << '\n';
-                return encodeRes.error();
-            }
-            const auto& bitStream = encodeRes.value().bitStream;
-            MlvcAccessUnit accessUnit;
-            accessUnit.data.assign(bitStream.begin(), bitStream.end());
-            decoderInputAccessUnits.push_back(std::move(accessUnit));
-        }
+        auto accessUnits = PreEncode(*manager, args, inputFrames);
+        if (!accessUnits) return accessUnits.error();
+        decoderInputAccessUnits = std::move(accessUnits.value());
         std::cerr << "  " << decoderInputAccessUnits.size() << " access units pre-encoded.\n";
-    }
-    // Wait outside the block above, so that the pre-encoding encoder is destroyed first
-    if (args.numDecoders > 0) {
+        if (!args.saveDecoderInputFile.empty()) {
+            if (auto ret = WriteMlvcAccessUnits(args.saveDecoderInputFile, decoderInputAccessUnits); !ret) {
+                std::cerr << "Error: Failed to save decoder input: " << ret.error().message() << '\n';
+                return ret.error();
+            }
+            std::cerr << "  Saved to " << args.saveDecoderInputFile.string() << ".\n";
+        }
         waitAfter(args.waitSeconds, phases.encode, "pre-encoding decoder input");
     }
 
+    // Create and initialize one runner per stream
     const auto statsDump = args.saveStats ? std::make_unique<StatsDump>() : nullptr;
     BenchmarkResults benchmarkResults;
 
@@ -401,6 +454,7 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
         }
     }
 
+    // Run all streams in parallel until they finish
     record(phases.run, "Running runners");
     std::cerr << "Running benchmarks...\n";
     for (auto& runner : runners) {
@@ -417,16 +471,20 @@ expected<void> RunBenchmark(const BenchmarkArguments& args)
     for (auto& runner : runners) {
         runner->Join();
     }
+
+    // Tear down step by step, waiting after each step so that the profile shows the memory it releases
     record(phases.stop, "Destroying runners");
     runners.clear();
     waitAfter(args.waitSeconds, phases.stop, "destroying runners");
     record(phases.exit, "Destroying manager");
     manager.reset();
+    waitAfter(args.waitSeconds, phases.exit, "destroying manager");
     record(phases.exit, "Releasing input data");
     inputFrames = {};
     decoderInputAccessUnits = {};
     if (metrics) metrics->Stop();
 
+    // Report the results
     if (statsDump) statsDump->Save((outputDir / "stats.json").string());
 
     PrintBenchmarkSummary(benchmarkResults);
@@ -600,44 +658,47 @@ int main(int argc, char** argv)
     using namespace libmlvc;
 
     const std::string_view cmd{ argc >= 2 ? argv[1] : "" };
+    // --help or -h after the command lists the command's options instead of running it
+    const bool help = std::ranges::any_of(argv + std::min(argc, 2), argv + argc,
+                                          [](const std::string_view arg) { return arg == "--help" || arg == "-h"; });
     if (cmd == "encode") {
         EncodeArguments args;
-        if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
+        if (help || !args.ParseCommandLine(argc - 2, argv + 2)) {
             EncodeArguments{}.PrintHelp();
-            return 1;
+            return help ? 0 : 1;
         }
         if (auto ret = RunEncode(args); !ret) return 1;
     } else if (cmd == "decode") {
         DecodeArguments args;
-        if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
+        if (help || !args.ParseCommandLine(argc - 2, argv + 2)) {
             DecodeArguments{}.PrintHelp();
-            return 1;
+            return help ? 0 : 1;
         }
         if (auto ret = RunDecode(args); !ret) return 1;
     } else if (cmd == "benchmark") {
         BenchmarkArguments args;
-        if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
+        if (help || !args.ParseCommandLine(argc - 2, argv + 2)) {
             BenchmarkArguments{}.PrintHelp();
-            return 1;
+            return help ? 0 : 1;
         }
         if (auto ret = RunBenchmark(args); !ret) return 1;
     } else if (cmd == "validate") {
         ValidationArguments args;
-        if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
+        if (help || !args.ParseCommandLine(argc - 2, argv + 2)) {
             ValidationArguments{}.PrintHelp();
-            return 1;
+            return help ? 0 : 1;
         }
         if (auto ret = RunValidation(args); !ret) return 1;
     } else if (cmd == "interop") {
         InteropArguments args;
-        if (auto ret = args.ParseCommandLine(argc - 2, argv + 2); !ret) {
+        if (help || !args.ParseCommandLine(argc - 2, argv + 2)) {
             InteropArguments{}.PrintHelp();
-            return 1;
+            return help ? 0 : 1;
         }
         auto ret = RunInterop(args);
         if (!ret) return 1;
         if (!ret.value()) return 2;
-    } else if (cmd == "help") {
+    } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         PrintHelp();
     } else {
         std::cerr << "Unknown command: " << cmd << "\n";

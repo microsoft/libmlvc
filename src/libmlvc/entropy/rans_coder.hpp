@@ -9,6 +9,8 @@
 
 #include "libmlvc/common/macros.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <system_error>
@@ -28,7 +30,12 @@ enum class error : int {
     invalid_params,
     invalid_state,
     invalid_stream,
+    value_out_of_range,
 };
+
+// All values but INT32_MIN, which overflows std::abs() in the scale decoder
+inline constexpr int32_t kMinValue = -std::numeric_limits<int32_t>::max();
+inline constexpr int32_t kMaxValue = std::numeric_limits<int32_t>::max();
 
 // rANS error category
 const std::error_category& error_category() noexcept;
@@ -229,7 +236,7 @@ public:
     std::error_code Initialize(RansVariant variant, const std::span<const int32_t>& pmfLengths,
                                const std::span<const int32_t>& pmfOffsets, const std::span<const int32_t>& pmfTable,
                                int symbolBits = 16, int bypassBits = 4);
-    // Encode
+    // Encode; returns an empty span on failure
     std::span<const std::byte> Encode(IResizableBuffer& buffer, const std::span<const int32_t>& indices,
                                       const std::span<const int32_t>& values) const
     {
@@ -278,7 +285,7 @@ public:
     virtual std::error_code Decode(const std::span<int32_t>& values, const std::span<const int32_t>& indices,
                                    RansDecoderStream& stream) const
     {
-        if (!m_impl || !stream.m_impl) {
+        if (!m_impl || !stream.IsOpen()) {
             return make_error_code(error::invalid_state);
         }
         return m_impl->Decode(values, indices, *stream.m_impl);

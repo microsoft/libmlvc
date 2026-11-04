@@ -244,9 +244,7 @@ void PrintManagerInfo(const ManagerInfo& config)
     if (config.enableModelCache) {
         std::cerr << ", model_cache";
     }
-    if (config.enableSessionPreloading) {
-        std::cerr << ", session_preloading";
-    }
+    std::cerr << ", session_preload " << SessionPreloadModeToString(config.sessionPreloadMode);
     if (config.inferenceBackend == InferenceBackend::WINDOWSML) {
         if (!config.windowsAppRuntimeVersion.empty()) {
             std::cerr << ", app_runtime " << config.windowsAppRuntimeVersion;
@@ -681,6 +679,7 @@ void PrintHelp()
     std::cerr << "  validate    Run validation test\n";
     std::cerr << "  interop     Run interop tests against reference snapshots\n";
     std::cerr << "  help        Print help\n";
+    std::cerr << "\nRun 'mlvc <command> --help' to list the options of a command.\n";
 }
 
 void PrintPassFail(bool passed, const char* suffix)

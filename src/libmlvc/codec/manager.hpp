@@ -3,6 +3,7 @@
 
 #pragma once
 #include "libmlvc/codec/bundle.hpp"
+#include "libmlvc/common/thread_pool.hpp"
 #include "libmlvc/inference/interface.hpp"
 #include "libmlvc/schema/bundle.hpp"
 
@@ -20,6 +21,7 @@ namespace libmlvc {
 
 class MlvcEncoderImpl;
 class MlvcDecoderImpl;
+class ModelCache;
 
 class MlvcManagerImpl : public std::enable_shared_from_this<MlvcManagerImpl> {
 public:
@@ -68,8 +70,10 @@ public:
 private:
     ManagerParams m_params{};
     ManagerInfo m_info{};
+    std::shared_ptr<ModelCache> m_modelCache;
     std::unique_ptr<IInferenceEngine> m_inferenceEngine;
-    std::map<MlvcVersion, ModelBundle> m_bundles;
+    std::map<MlvcVersion, std::unique_ptr<ModelBundle>> m_bundles;
+    std::unique_ptr<ThreadPool> m_sessionCreationPool;  // After m_bundles, so it stops before the bundles are destroyed
     std::atomic<bool> m_initialized{ false };
     mutable std::atomic<int> m_encoderCounter{ 0 };
     mutable std::atomic<int> m_decoderCounter{ 0 };

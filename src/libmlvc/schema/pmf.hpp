@@ -12,6 +12,9 @@
 namespace libmlvc {
 
 struct BasePmf {
+    // The frequencies of each PMF in pmfTable sum to at most 1 << kPrecisionBits
+    static constexpr int kPrecisionBits = 16;
+
     std::vector<int> pmfLengths;
     std::vector<int> pmfOffsets;
     std::vector<int> pmfTable;

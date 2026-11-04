@@ -8,6 +8,7 @@
 
 #include <boost/json.hpp>
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -29,6 +30,42 @@ std::error_code ParseRequired(const boost::json::object& parent, std::string_vie
         return result.error();
     }
     out = std::move(result.value());
+    return {};
+}
+
+// The rANS coder's rules, to reject invalid bundles when loading them
+std::error_code ValidateTables(const BasePmf& pmf)
+{
+    const auto& lengths = pmf.pmfLengths;
+    const auto& offsets = pmf.pmfOffsets;
+    const std::span<const int> table{ pmf.pmfTable };
+    if (lengths.empty() || offsets.size() != lengths.size()) {
+        MLVC_LOG_ERROR("Invalid PMF count: %zu lengths, %zu offsets", lengths.size(), offsets.size());
+        return make_error_code(Error::invalid_argument);
+    }
+    size_t cursor = 0;
+    for (size_t i = 0; i < lengths.size(); i++) {
+        // The value 0 must be a symbol before the last element, the bypass tail mass
+        if (lengths[i] <= 1 || offsets[i] < 0 || offsets[i] >= lengths[i] - 1
+            || table.size() - cursor < static_cast<size_t>(lengths[i])) {
+            MLVC_LOG_ERROR("Invalid PMF %zu: length %d, offset %d, table size %zu", i, lengths[i], offsets[i],
+                           table.size());
+            return make_error_code(Error::invalid_argument);
+        }
+        int64_t total = 0;
+        for (const int freq : table.subspan(cursor, static_cast<size_t>(lengths[i]))) {
+            total += freq;
+            if (freq <= 0 || total > (int64_t{ 1 } << BasePmf::kPrecisionBits)) {
+                MLVC_LOG_ERROR("Invalid PMF %zu frequencies", i);
+                return make_error_code(Error::invalid_argument);
+            }
+        }
+        cursor += static_cast<size_t>(lengths[i]);
+    }
+    if (cursor != table.size()) {
+        MLVC_LOG_ERROR("Invalid PMF table size %zu for PMFs of %zu elements", table.size(), cursor);
+        return make_error_code(Error::invalid_argument);
+    }
     return {};
 }
 
@@ -86,6 +123,14 @@ expected<GaussianCoderPmf> GaussianCoderPmf::FromJsonBuffer(std::span<const std:
         MLVC_LOG_ERROR("Failed to convert JSON value to GaussianCoderPmf");
         return make_error_code(Error::json_parse_error);
     }
+    const auto& pmf = result.value();
+    if (auto ec = ValidateTables(pmf); ec) {
+        return ec;
+    }
+    if (pmf.scaleLevels != static_cast<int64_t>(pmf.pmfLengths.size())) {
+        MLVC_LOG_ERROR("GaussianCoderPmf scale_levels %d doesn't match %zu PMFs", pmf.scaleLevels, pmf.pmfLengths.size());
+        return make_error_code(Error::invalid_argument);
+    }
     return result.value();
 }
 
@@ -102,6 +147,16 @@ expected<BitEstimatorPmf> BitEstimatorPmf::FromJsonBuffer(std::span<const std::b
     if (!result) {
         MLVC_LOG_ERROR("Failed to convert JSON value to BitEstimatorPmf");
         return make_error_code(Error::json_parse_error);
+    }
+    const auto& pmf = result.value();
+    if (auto ec = ValidateTables(pmf); ec) {
+        return ec;
+    }
+    if (pmf.qpNum <= 0 || pmf.channels <= 0
+        || static_cast<int64_t>(pmf.qpNum) * pmf.channels != static_cast<int64_t>(pmf.pmfLengths.size())) {
+        MLVC_LOG_ERROR("BitEstimatorPmf qp_num %d and channels %d don't match %zu PMFs", pmf.qpNum, pmf.channels,
+                       pmf.pmfLengths.size());
+        return make_error_code(Error::invalid_argument);
     }
     return result.value();
 }

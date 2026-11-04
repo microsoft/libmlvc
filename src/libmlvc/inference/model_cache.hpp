@@ -5,53 +5,43 @@
 #include <libmlvc/expected.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
-#include <mutex>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace libmlvc {
 
-// Singleton cache manager for compiled model caching (EP context, CoreML, etc.).
-// Manages cache directories for compiled models, with timestamp-based expiration.
-// Thread-safe for concurrent session creation.
-// Platform-agnostic: works on Windows, macOS, and other platforms.
+// On-disk format and lifecycle: docs/model-cache-design.md.
 class ModelCache {
 public:
-    static ModelCache& Instance();
+    using CompileFunction = std::function<expected<void>(const std::filesystem::path& dir)>;
 
-    // Set the root cache directory. Must be set before any cache operations.
-    // Once set, changing to a different non-empty path is ignored (with warning).
-    // Setting to empty resets.
-    void SetRootCacheDir(const std::filesystem::path& rootDir);
+    static constexpr std::chrono::seconds kRetention = std::chrono::days(14);
+    static constexpr uintmax_t kSizeLimit = uintmax_t{ 512 } << 20;  // 512 MiB
 
-    // Create a new cache directory for the given key.
-    // Returns path to: {cacheRoot}/{cacheKey}/
-    expected<std::filesystem::path> CreateCacheDir(std::string_view cacheKey) noexcept;
-
-    // Locate existing cache directory and update access timestamp.
-    // Returns path if directory exists, error otherwise.
-    expected<std::filesystem::path> LocateCacheDir(std::string_view cacheKey) noexcept;
-
-    // Delete cache directory for given key.
-    expected<void> DeleteCacheDir(std::string_view cacheKey) noexcept;
-
-    // Cleanup old cache dirs. Default retention: 60 days.
-    // Runs at most once per hour unless force=true.
-    expected<void> CleanupCacheDirs(std::chrono::seconds retentionTime = std::chrono::hours(60 * 24),
-                                    bool force = false) noexcept;
+    // Cache-operation failures return model_cache_error; invalid arguments and callback errors are unchanged.
+    static expected<std::shared_ptr<ModelCache>> Create(const std::filesystem::path& entriesDir);
+    expected<std::filesystem::path> GetOrCreate(std::string_view key, const CompileFunction& compile) const;
+    expected<std::filesystem::path> Get(std::string_view key) const;
+    void Cleanup(std::chrono::seconds retention = kRetention, uintmax_t sizeLimit = kSizeLimit) const noexcept;
 
 private:
-    ModelCache() = default;
-    ~ModelCache() = default;
-    ModelCache(const ModelCache&) = delete;
-    ModelCache& operator=(const ModelCache&) = delete;
+    std::filesystem::path m_entriesDir;
+    std::filesystem::path m_stagingDir;
+    std::filesystem::path m_trashDir;
 
-    expected<void> UpdateAccessTime(const std::filesystem::path& cacheDir) noexcept;
-    expected<std::chrono::system_clock::time_point> ReadAccessTime(const std::filesystem::path& cacheDir) noexcept;
-
-    std::mutex m_mutex;
-    std::filesystem::path m_rootDir;
-    std::chrono::system_clock::time_point m_lastCleanupTime{};
+    explicit ModelCache(std::filesystem::path entriesDir);
+    expected<std::filesystem::path> Acquire(std::string_view key, const CompileFunction* compile) const;
+    expected<void> CreateEntry(const std::filesystem::path& entryDir, const CompileFunction& compile) const;
+    void CleanLeftovers() const noexcept;
+    void ApplyRetention(std::chrono::seconds retention, uintmax_t sizeLimit) const noexcept;
+    bool Remove(const std::filesystem::path& dir, std::optional<int64_t> chosenTime) const;
+    static std::string UniqueName();
+    static bool IsStagingAbandoned(const std::filesystem::path& stagingDir, std::optional<int64_t> time);
 };
 
 }  // namespace libmlvc

@@ -7,7 +7,7 @@
 
 namespace libmlvc {
 
-static constexpr int RANS_SYMBOL_BITS = 16;
+static constexpr int RANS_SYMBOL_BITS = BasePmf::kPrecisionBits;
 static constexpr int RANS_BYPASS_BITS = 2;
 
 expected<void> GaussianEncoder::Initialize()
