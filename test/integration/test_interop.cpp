@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 
@@ -21,7 +22,7 @@ protected:
         // To speed up tests, disable session preloading
         ManagerParams managerParams;
         managerParams.computeUnit = GetTestConfig().computeUnit;
-        managerParams.enableSessionPreloading = false;
+        managerParams.sessionPreloadMode = SessionPreloadMode::NONE;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
 
         auto manager =
@@ -52,6 +53,13 @@ protected:
 
             const auto& m = result.value().metrics;
             const auto& t = result.value().thresholds;
+            std::fprintf(stderr,
+                         "%s/%s: mean PSNR %.2f dB (floor %.1f dB), min PSNR %.2f dB (floor %.1f dB), "
+                         "PSNR drop %.2f dB (limit %.2f dB), bit-exact %.1f%%%s\n",
+                         datasetName.c_str(), snapshotDir.filename().string().c_str(), m.meanPsnr, t.meanPsnrFloor,
+                         m.minPsnr, t.minPsnrFloor, m.psnrDrop, t.maxPsnrDrop, m.decoderBitExactPct,
+                         t.requireBitExact ? " (required)" : "");
+
             ASSERT_FALSE(std::isnan(m.meanPsnr)) << "Mean PSNR is NaN";
             EXPECT_GE(m.meanPsnr, t.meanPsnrFloor) << "Mean PSNR below floor";
             EXPECT_GE(m.minPsnr, t.minPsnrFloor) << "Min PSNR below floor";

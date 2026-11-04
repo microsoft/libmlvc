@@ -102,7 +102,7 @@ expected<const ReferenceManager::Slot*> ReferenceManager::AcquireOutputSlot(cons
                 return i;
             }
         }
-        MLVC_LOG_DEBUG("Allocating reference slot, new number of slots: %zu", m_slots.size() + 1);
+        MLVC_LOG_TRACE("Allocating reference slot, new number of slots: %zu", m_slots.size() + 1);
         auto slot = Slot::Create(m_session);
         if (!slot) {
             MLVC_LOG_ERROR("Failed to create reference slot: %s", slot.error().message().c_str());
@@ -337,7 +337,7 @@ void LtrBranch::UpdateFrameMarking(const int frameIdx, const bool isRecovery)
             m_rootFrameIdx = frameIdx;
         }
         m_ltrMarkingCounter = 0;
-        MLVC_LOG_DEBUG("LTR marked: frameIdx=%d, slot=%d, isRoot=%d, isRecovery=%d, branchId=%d, branchDepth=%d",
+        MLVC_LOG_TRACE("LTR marked: frameIdx=%d, slot=%d, isRoot=%d, isRecovery=%d, branchId=%d, branchDepth=%d",
                        frameIdx, slotIdx, markAsRoot, isRecovery, m_branchId, m_branchDepth);
     }
 
@@ -364,7 +364,7 @@ void LtrManager::Reset()
 expected<void> LtrManager::MarkNextFrameAsLtr(const int ltrSlotIdx)
 {
     if (m_config.ltrMode != LtrMode::EXTERNAL) {
-        MLVC_LOG_DEBUG("Cannot mark LTR frame when LTR mode is not EXTERNAL, ignoring request");
+        MLVC_LOG_TRACE("Cannot mark LTR frame when LTR mode is not EXTERNAL, ignoring request");
         return {};
     }
 

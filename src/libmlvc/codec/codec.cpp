@@ -253,7 +253,7 @@ expected<EncodedFrame> MlvcEncoderImpl::Encode(const Nv12FrameView& frame, const
         std::snprintf(encodeCtx + encodeCtxLen, sizeof(encodeCtx) - encodeCtxLen, ", force_recovery, ltr_slot=%d",
                       params.useLtrSlotIdx.value());
     }
-    MLVC_LOG_DEBUG("[%s] Encode: %s", m_tag.c_str(), encodeCtx);
+    MLVC_LOG_TRACE("[%s] Encode: %s", m_tag.c_str(), encodeCtx);
 
     // Reconfigure encoder if needed
     if (auto ret = ConfigureEncoder(); !ret) {
@@ -314,11 +314,11 @@ expected<EncodedFrame> MlvcEncoderImpl::Encode(const Nv12FrameView& frame, const
     }
 
     // Log encode result
-    MLVC_LOG_INFO("[%s] Encoded: cur=%d, ref=%d, tid=%d, type=%s, qp=%d, size=%dx%d, ltr=[%s], bytes=%zu/%zu, chain=%d",
-                  m_tag.c_str(), frameData.curFrameIdx, frameData.refFrameIdx, frameData.temporalId, frameTypeStr,
-                  frameData.qp, frameData.DisplayWidth(), frameData.DisplayHeight(),
-                  LtrSlots2Str(frameData.ltrSlots).c_str(), bitstream.value().size(), frameData.payload.size(),
-                  frameInfo.predictionChainLength);
+    MLVC_LOG_DEBUG(
+        "[%s] Encoded: cur=%d, ref=%d, tid=%d, type=%s, qp=%d, size=%dx%d, ltr=[%s], bytes=%zu/%zu, chain=%d",
+        m_tag.c_str(), frameData.curFrameIdx, frameData.refFrameIdx, frameData.temporalId, frameTypeStr, frameData.qp,
+        frameData.DisplayWidth(), frameData.DisplayHeight(), LtrSlots2Str(frameData.ltrSlots).c_str(),
+        bitstream.value().size(), frameData.payload.size(), frameInfo.predictionChainLength);
 
     // Finalize stats and return
     timer.Stop();
@@ -620,9 +620,9 @@ expected<DecodedFrame> MlvcDecoderImpl::Decode(std::span<const std::byte> bytes)
     }
 
     // Log decode result
-    MLVC_LOG_INFO("[%s] Decoded: %s, size=%dx%d, ltr=[%s], bytes=%zu/%zu, chain=%d", m_tag.c_str(), decodeCtx,
-                  frameData->DisplayWidth(), frameData->DisplayHeight(), LtrSlots2Str(frameData->ltrSlots).c_str(),
-                  bytes.size(), frameData->payload.size(), decodedFrame->info.predictionChainLength);
+    MLVC_LOG_DEBUG("[%s] Decoded: %s, size=%dx%d, ltr=[%s], bytes=%zu/%zu, chain=%d", m_tag.c_str(), decodeCtx,
+                   frameData->DisplayWidth(), frameData->DisplayHeight(), LtrSlots2Str(frameData->ltrSlots).c_str(),
+                   bytes.size(), frameData->payload.size(), decodedFrame->info.predictionChainLength);
 
     // Update stats
     AggregateCoreStats(*m_decoderCore, m_stats);

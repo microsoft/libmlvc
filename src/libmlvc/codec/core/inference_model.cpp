@@ -95,7 +95,7 @@ MlvcBaseModel::MlvcBaseModel(std::string_view name, const InferenceSessionPtr& s
 
 expected<void> MlvcBaseModel::Initialize()
 {
-    MLVC_LOG_DEBUG("Initialize model: %s", m_modelName.c_str());
+    MLVC_LOG_TRACE("Initialize model: %s", m_modelName.c_str());
     return {};
 }
 

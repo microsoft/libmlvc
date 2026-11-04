@@ -358,7 +358,10 @@ expected<DecodedFrame> MlvcDecoderCore::Decode(const FrameData& frameData)
         // Decode z_raw
         {
             ManualOpTimer timer;
-            m_stream.Open(frameData.payload);
+            if (auto err = m_stream.Open(frameData.payload); err) {
+                MLVC_LOG_INFO("Failed to open RANS decoder stream: %s", err.message().c_str());
+                return make_error_code(Error::entropy_coder_decode_error);
+            }
             m_zRawInt32.Create(m_inputs.zRaw.Shape());
             if (auto ret = m_bitEstimatorZ.Decode(m_stream, qIndex.value(), m_zRawInt32); !ret) {
                 MLVC_LOG_INFO("Failed to decode zRaw: %s", ret.error().message().c_str());

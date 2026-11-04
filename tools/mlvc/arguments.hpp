@@ -16,6 +16,12 @@
 
 namespace libmlvc {
 
+struct InputClip {
+    std::filesystem::path path;
+    int width = 0;
+    int height = 0;
+};
+
 class IArguments {
 public:
     virtual ~IArguments() = default;
@@ -36,7 +42,7 @@ public:
     std::filesystem::path cacheDir;
     LogLevel logLevel = LogLevel::Error;
     bool enableModelCache = true;
-    bool enableSessionPreloading = true;
+    SessionPreloadMode sessionPreloadMode = SessionPreloadMode::AT_INIT;
     WinMlInitMode winmlInitMode = WinMlInitMode::AppSdk;
 
 protected:
@@ -48,16 +54,19 @@ protected:
     static expected<int> ParseValue(std::span<std::string_view> args, ComputeUnit& output);
     static expected<int> ParseValue(std::span<std::string_view> args, LogLevel& output);
     static expected<int> ParseValue(std::span<std::string_view> args, LtrMode& output);
+    static expected<int> ParseValue(std::span<std::string_view> args, SessionPreloadMode& output);
     static expected<int> ParseValue(std::span<std::string_view> args, WinMlInitMode& output);
     static expected<int> ParseValue(std::span<std::string_view> args, int& output);
     static expected<int> ParseValue(std::span<std::string_view> args, double& output);
     static expected<int> ParseValue(std::span<std::string_view> args, bool& output);
     static expected<int> ParseValue(std::span<std::string_view> args, VideoReader::PixelFormat& output);
     static expected<int> ParseValue(std::span<std::string_view> args, VideoWriter::Format& output);
+    static expected<int> ParseValue(std::span<std::string_view> args, InputClip& output);
     static expected<int> ParseValue(std::span<std::string_view> args, std::filesystem::path& output);
     static expected<int> ParseValue(std::span<std::string_view> args, std::string& output);
     static expected<int> ParseValue(std::span<std::string_view> args, std::vector<int>& output);
     static expected<int> ParseValue(std::span<std::string_view> args, std::vector<std::string>& output);
+    static expected<int> ParseValue(std::span<std::string_view> args, std::vector<InputClip>& output);
 };
 
 class EncoderConfigArguments : public CommonArguments, public EncoderConfigOverrides {
@@ -69,11 +78,11 @@ protected:
 
 class BenchmarkArguments : public EncoderConfigArguments {
 public:
-    std::filesystem::path inputFile = GetTestDataDir() / "clips/VCD_s1_0380a3_960x540_30fps.nv12.gz";
-    int inputWidth = 960;
-    int inputHeight = 540;
+    std::vector<InputClip> inputs = { { GetTestDataDir() / "clips/VCD_s1_0380a3_960x540_30fps.nv12.gz", 960, 540 } };
+    std::filesystem::path decoderInputFile;
     std::filesystem::path outputDirectory = "./";
     bool saveStats = false;
+    std::filesystem::path saveDecoderInputFile;
     int numEncoders = 0;
     int numDecoders = 0;
     double targetFps = 1000.0;

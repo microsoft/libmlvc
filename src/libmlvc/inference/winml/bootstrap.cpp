@@ -557,6 +557,18 @@ expected<LoadedWinMlModules> LoadWinMlModules(WinMlInitMode mode, const Initiali
         return make_unexpected(hOnnxRuntime.error());
     }
 
+    // OpenVINO caches OrtApi for its plugin DLL's lifetime, which may exceed an engine's lifetime.
+    // If ORT unloads first, the cached pointer dangles and the next CreateEpFactories call can crash.
+    // Pin this runtime until process exit, by address to avoid selecting another host-loaded onnxruntime.dll.
+    // Related plugin-DLL reference leak: https://github.com/microsoft/onnxruntime/issues/28395
+    HMODULE pinnedRuntime = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            reinterpret_cast<LPCWSTR>(hOnnxRuntime->get()), &pinnedRuntime)) {
+        const auto lastError = GetLastError();
+        MLVC_LOG_ERROR("Failed to pin ONNX Runtime (Error: 0x%08lX)", static_cast<unsigned long>(lastError));
+        return make_unexpected(make_error_code(Error::model_init_error));
+    }
+
     if (progressCallback) {
         progressCallback(StatusMessage{ "Loading Windows ML" });
     }
@@ -826,7 +838,7 @@ EnsureExecutionProviderReady(const WinMlApi& winMl, const OrtApi* ortApi, OrtEnv
                 downloadTimeMs = static_cast<uint32_t>(std::min<int64_t>(elapsed, std::numeric_limits<uint32_t>::max()));
             }
         } else {
-            MLVC_LOG_DEBUG("Execution provider '%s' is already ready", providerLogName);
+            MLVC_LOG_TRACE("Execution provider '%s' is already ready", providerLogName);
         }
     }
 

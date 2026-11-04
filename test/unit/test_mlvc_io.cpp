@@ -328,3 +328,27 @@ TEST(UnitTestMlvcReader, ReadMlvcAccessUnitsRejectsMissingFile)
     ASSERT_FALSE(accessUnits);
     EXPECT_EQ(accessUnits.error(), make_error_code(Error::io_error));
 }
+
+// ============================================================================
+// WriteMlvcAccessUnits
+// ============================================================================
+
+TEST(UnitTestMlvcWriter, WriteMlvcAccessUnitsWritesFileReadableByReadMlvcAccessUnits)
+{
+    ScopedTempFile file(".mlvc", {});
+    const std::vector<MlvcAccessUnit> accessUnits = { { kVclAccessUnit1 }, { kVclAccessUnit2 } };
+    ASSERT_TRUE(WriteMlvcAccessUnits(file.path, accessUnits));
+
+    auto readAccessUnits = ReadMlvcAccessUnits(file.path);
+    ASSERT_TRUE(readAccessUnits);
+    ASSERT_EQ(readAccessUnits->size(), 2u);
+    EXPECT_EQ((*readAccessUnits)[0].data, kVclAccessUnit1);
+    EXPECT_EQ((*readAccessUnits)[1].data, kVclAccessUnit2);
+}
+
+TEST(UnitTestMlvcWriter, WriteMlvcAccessUnitsRejectsMissingDirectory)
+{
+    auto write = WriteMlvcAccessUnits("nonexistent_access_unit_dir/access_units.mlvc", {});
+    ASSERT_FALSE(write);
+    EXPECT_EQ(write.error(), make_error_code(Error::io_error));
+}

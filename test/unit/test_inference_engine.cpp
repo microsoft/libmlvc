@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +41,7 @@ using namespace libmlvc;
 namespace {
 
 constexpr auto kCacheKey = "unit_test_model";
+constexpr auto kManifestFilename = "mlvc_manifest.json";
 constexpr auto kAccessTimeFilename = "last_access.time";
 const auto kInvalidModel = std::vector<std::byte>(1024, std::byte{ 0x5a });
 
@@ -51,11 +53,11 @@ struct TestModel {
     std::optional<std::string> m_functionName;
 };
 
-// Use the lowest-resolution decoder from the engine-compatible bundle.
 expected<TestModel> LoadTestModel(const InferenceEngineInfo& info)
 {
+    // Use the smallest compatible decoder to keep real-model tests inexpensive.
     const auto versions = std::array{ GetTestConfig().mlvcVersion };
-    auto bundles = LoadModelBundles(GetDefaultModelBundlesDir(), versions, info);
+    auto bundles = ReadBundleBlobs(GetDefaultModelBundlesDir(), versions, info);
     if (!bundles) return bundles.error();
 
     auto model = TestModel{};
@@ -90,7 +92,7 @@ expected<TestModel> LoadTestModel(const InferenceEngineInfo& info)
     return model;
 }
 
-expected<std::unique_ptr<IInferenceEngine>> MakeEngine(ComputeUnit computeUnit)
+expected<std::unique_ptr<IInferenceEngine>> MakeEngine(ComputeUnit computeUnit, std::shared_ptr<ModelCache> modelCache)
 {
     if (computeUnit == ComputeUnit::AUTO) {
         computeUnit = HasSupportedNpu() ? ComputeUnit::NPU : ComputeUnit::GPU;
@@ -108,9 +110,10 @@ expected<std::unique_ptr<IInferenceEngine>> MakeEngine(ComputeUnit computeUnit)
         params.onnxExecutionProvider =
             computeUnit == ComputeUnit::NPU ? OnnxExecutionProvider::OPENVINO : OnnxExecutionProvider::DIRECTML;
     }
+    params.modelCache = std::move(modelCache);
     return MakeWinMlEngine(params);
 #elif defined(MLVC_PLATFORM_APPLE)
-    return MakeCoreMlEngine(CoreMlEngineParams{ computeUnit });
+    return MakeCoreMlEngine({ .computeUnit = computeUnit, .modelCache = std::move(modelCache) });
 #endif
 }
 
@@ -142,7 +145,6 @@ bool HasComputeUnit(ComputeUnit computeUnit)
     return false;
 }
 
-// Runs the session once on freshly allocated tensors
 std::error_code RunSession(IInferenceSession& session)
 {
     auto inputNames = session.GetInputNames();
@@ -171,17 +173,21 @@ class UnitTestInferenceEngine : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        // Without the configured compute unit, test the CPU engine: tests that need a model cache skip themselves
         auto computeUnit = GetTestConfig().computeUnit;
         if (!HasComputeUnit(computeUnit)) {
             MLVC_LOG_WARN("No %s on this device, testing the CPU engine", ComputeUnitToString(computeUnit));
             computeUnit = ComputeUnit::CPU;
         }
 #if defined(MLVC_PLATFORM_APPLE)
-        // Core ML's model cache doesn't depend on the compute unit, and a fresh compile for the Neural Engine takes ~30 s
+        // Core ML's cache is compute-unit independent; avoid Neural Engine compilation overhead.
         computeUnit = ComputeUnit::CPU;
 #endif
-        auto engine = MakeEngine(computeUnit);
+        s_cacheDir = std::filesystem::temp_directory_path()
+                     / ("mlvc_inference_engine_test_" + std::to_string(std::random_device{}()));
+        auto cache = ModelCache::Create(s_cacheDir / "models");
+        ASSERT_TRUE(cache) << cache.error().message();
+        s_cache = std::move(cache.value());
+        auto engine = MakeEngine(computeUnit, s_cache);
         ASSERT_TRUE(engine) << engine.error().message();
         auto model = LoadTestModel(engine.value()->GetInfo());
         ASSERT_TRUE(model) << model.error().message();
@@ -193,28 +199,29 @@ protected:
     {
         s_engine.reset();
         s_model = {};
+        s_cache.reset();
     }
 
     void SetUp() override
     {
         ASSERT_TRUE(s_engine) << "Creating the inference engine failed";
-        const auto cacheDir = std::filesystem::temp_directory_path()
-                              / ("mlvc_inference_engine_test_" + std::to_string(std::random_device{}()));
-        ASSERT_TRUE(std::filesystem::create_directory(cacheDir));
-        m_cacheDir = cacheDir;
-        // The model cache root is process-wide: replace the one set by earlier tests
-        ModelCache::Instance().SetRootCacheDir({});
-        ModelCache::Instance().SetRootCacheDir(m_cacheDir);
+        std::error_code ec;
+        std::filesystem::remove_all(s_cacheDir, ec);
+        ASSERT_TRUE(std::filesystem::create_directory(s_cacheDir, ec)) << ec.message();
     }
 
     void TearDown() override
     {
-        if (!m_cacheDir.empty()) {
-            ModelCache::Instance().SetRootCacheDir({});
-            std::error_code ec;
-            std::filesystem::remove_all(m_cacheDir, ec);
-            EXPECT_FALSE(ec) << ec.message();
-        }
+        std::error_code ec;
+        std::filesystem::remove_all(s_cacheDir, ec);
+        EXPECT_FALSE(ec) << ec.message();
+    }
+
+    size_t CountCacheFiles() const
+    {
+        // Include staging and trash so failed operations cannot hide leftover files.
+        return static_cast<size_t>(std::ranges::count_if(std::filesystem::recursive_directory_iterator(s_cacheDir),
+                                                         [](const auto& entry) { return entry.is_regular_file(); }));
     }
 
     expected<bool> PrepareModelCache()
@@ -234,40 +241,34 @@ protected:
     CachedFileTimes CachedFiles() const
     {
         CachedFileTimes files;
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(m_cacheDir)) {
-            if (entry.is_regular_file() && entry.path().filename() != kAccessTimeFilename) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(s_cacheDir)) {
+            const auto name = entry.path().filename();
+            if (entry.is_regular_file() && name != kAccessTimeFilename && name != kManifestFilename) {
                 files[entry.path()] = static_cast<int64_t>(entry.last_write_time().time_since_epoch().count());
             }
         }
         return files;
     }
 
-    // Removes the compiled models but keeps their cache entries; no session may be using them
-    void RemoveCompiledModels() const
-    {
-        for (const auto& entry : std::filesystem::directory_iterator(m_cacheDir)) {
-            for (const auto& item : std::filesystem::directory_iterator(entry.path())) {
-                if (item.path().filename() != kAccessTimeFilename) std::filesystem::remove_all(item.path());
-            }
-        }
-    }
-
-    // Overwrites the compiled models with invalid data; no session may be using them
     void CorruptCompiledModels() const
     {
+        // Keep sizes and metadata valid so only the backend detects the corruption.
         for (const auto& path : CachedFiles() | std::views::keys) {
+            const auto size = std::filesystem::file_size(path);
             auto file = std::ofstream{ path, std::ios::binary | std::ios::trunc };
             ASSERT_TRUE(file) << path;
-            file << "corrupt";
+            file << std::string(static_cast<size_t>(size), 'x');
+            file.close();
             ASSERT_TRUE(file) << path;
         }
     }
 
+    static inline std::filesystem::path s_cacheDir;
+    static inline std::shared_ptr<ModelCache> s_cache;
     static inline std::unique_ptr<IInferenceEngine> s_engine;
     static inline TestModel s_model;
 
     const TestModel& m_model = s_model;
-    std::filesystem::path m_cacheDir;
 };
 
 TEST_F(UnitTestInferenceEngine, RejectsInvalidArguments)
@@ -290,6 +291,26 @@ TEST_F(UnitTestInferenceEngine, RejectsInvalidArguments)
         ASSERT_FALSE(cached);
         EXPECT_EQ(cached.error(), make_error_code(Error::invalid_argument));
     }
+    if (SupportsModelCache(s_engine->GetInfo())) {
+        for (const auto* cacheKey : { "", "invalid.key" }) {
+            SCOPED_TRACE("ValidateModelCache with an invalid key");
+            SCOPED_TRACE(cacheKey);
+            const auto validated = s_engine->ValidateModelCache(cacheKey);
+            ASSERT_FALSE(validated);
+            EXPECT_EQ(validated.error(), make_error_code(Error::invalid_argument));
+        }
+        SCOPED_TRACE("Invalid nonempty cache key");
+        const auto cached =
+            s_engine->PrepareModelCache(m_model.m_name, m_model.m_modelData, m_model.m_weightsData, "invalid.key");
+        ASSERT_FALSE(cached);
+        EXPECT_EQ(cached.error(), make_error_code(Error::invalid_argument));
+        for (const auto modelData : { std::span<const std::byte>{}, m_model.m_modelData }) {
+            const auto session = s_engine->CreateSession(m_model.m_name, modelData, m_model.m_weightsData,
+                                                         "invalid.key", m_model.m_functionName);
+            ASSERT_FALSE(session);
+            EXPECT_EQ(session.error(), make_error_code(Error::invalid_argument));
+        }
+    }
     if (s_engine->GetInfo().inferenceBackend == InferenceBackend::COREML) {
         SCOPED_TRACE("External weights");
         const auto weightsData =
@@ -301,39 +322,43 @@ TEST_F(UnitTestInferenceEngine, RejectsInvalidArguments)
         ASSERT_FALSE(session);
         EXPECT_EQ(session.error(), make_error_code(Error::invalid_argument));
     }
+    EXPECT_EQ(CountCacheFiles(), 0u);
     if (s_engine->GetInfo().inferenceBackend == InferenceBackend::COREML) {
-        SCOPED_TRACE("Unknown function name: the freshly compiled model is deleted");
+        SCOPED_TRACE("Unknown function name: the compiled model stays in the cache");
         auto session = s_engine->CreateSession(m_model.m_name, m_model.m_modelData, {}, kCacheKey, "missing");
         ASSERT_FALSE(session);
-        EXPECT_EQ(session.error(), make_error_code(Error::model_init_error));
+        EXPECT_EQ(session.error(), make_error_code(Error::model_cache_load_error));
+        EXPECT_FALSE(CachedFiles().empty());
     } else {
         SCOPED_TRACE("Function name");
         auto session =
             s_engine->CreateSession(m_model.m_name, m_model.m_modelData, m_model.m_weightsData, kCacheKey, "main");
         ASSERT_FALSE(session);
         EXPECT_EQ(session.error(), make_error_code(Error::invalid_argument));
+        EXPECT_EQ(CountCacheFiles(), 0u);
     }
-    EXPECT_TRUE(std::filesystem::is_empty(m_cacheDir));
 }
 
-// The Windows CPU EP has no model cache and ignores the cache key; Core ML uses no cache without a cache key.
 TEST_F(UnitTestInferenceEngine, CreateSessionWithoutModelCache)
 {
-    auto engine = MakeEngine(ComputeUnit::CPU);
+    auto engine = MakeEngine(ComputeUnit::CPU, nullptr);
     ASSERT_TRUE(engine) << engine.error().message();
-    const bool engineCaches = SupportsModelCache(engine.value()->GetInfo());
-    const std::string_view cacheKey = engineCaches ? "" : kCacheKey;
     const auto createSession = [&](std::span<const std::byte> modelData,
                                    const std::map<std::string, std::span<const std::byte>>& weightsData = {}) {
-        return engine.value()->CreateSession(m_model.m_name, modelData, weightsData, cacheKey, m_model.m_functionName);
+        return engine.value()->CreateSession(m_model.m_name, modelData, weightsData, kCacheKey, m_model.m_functionName);
     };
 
-    if (!engineCaches) {
+    {
         SCOPED_TRACE("PrepareModelCache");
         auto cached =
             engine.value()->PrepareModelCache(m_model.m_name, m_model.m_modelData, m_model.m_weightsData, kCacheKey);
         ASSERT_TRUE(cached) << cached.error().message();
         EXPECT_FALSE(cached.value());
+    }
+    {
+        SCOPED_TRACE("ValidateModelCache");
+        const auto validated = engine.value()->ValidateModelCache(kCacheKey);
+        ASSERT_TRUE(validated) << validated.error().message();
     }
     {
         SCOPED_TRACE("Model data");
@@ -352,13 +377,17 @@ TEST_F(UnitTestInferenceEngine, CreateSessionWithoutModelCache)
     {
         SCOPED_TRACE("Invalid model data");
         auto session = createSession(kInvalidModel);
-        EXPECT_FALSE(session);
+        ASSERT_FALSE(session);
+        const auto error = engine.value()->GetInfo().inferenceBackend == InferenceBackend::COREML
+                               ? Error::general_failure
+                               : Error::model_init_error;
+        EXPECT_EQ(session.error(), make_error_code(error));
     }
-    EXPECT_TRUE(std::filesystem::is_empty(m_cacheDir));
 }
 
 TEST_F(UnitTestInferenceEngine, ModelCacheLifecycle)
 {
+    // Backend load failures must not trigger repair; validation failures are tested separately.
     if (!SupportsModelCache(s_engine->GetInfo())) GTEST_SKIP() << "The inference engine has no model cache";
 
     CachedFileTimes compiledFiles;
@@ -376,6 +405,8 @@ TEST_F(UnitTestInferenceEngine, ModelCacheLifecycle)
         auto cached = PrepareModelCache();
         ASSERT_TRUE(cached) << cached.error().message();
         EXPECT_TRUE(cached.value());
+        const auto validated = s_engine->ValidateModelCache(kCacheKey);
+        ASSERT_TRUE(validated) << validated.error().message();
         auto session = CreateSession({});
         ASSERT_TRUE(session) << session.error().message();
         EXPECT_EQ(RunSession(*session.value()), std::error_code{});
@@ -400,73 +431,40 @@ TEST_F(UnitTestInferenceEngine, ModelCacheLifecycle)
         EXPECT_EQ(errors, std::vector<std::error_code>(errors.size()));
     }
 
-    // All sessions are released here: OpenVINO only compiles a model again when none of its sessions is alive
-    RemoveCompiledModels();
-    ASSERT_TRUE(CachedFiles().empty());
+    // All sessions are released here, so the compiled models can change
     {
-        SCOPED_TRACE("Compiled model missing, no model data");
+        SCOPED_TRACE("Corrupt model with valid sizes: counts as cached, but fails to load");
+        ASSERT_NO_FATAL_FAILURE(CorruptCompiledModels());
+        const auto corruptFiles = CachedFiles();
+        const auto validated = s_engine->ValidateModelCache(kCacheKey);
+        ASSERT_TRUE(validated) << validated.error().message();
+        auto cached = PrepareModelCache();
+        ASSERT_TRUE(cached) << cached.error().message();
+        EXPECT_TRUE(cached.value());
         auto session = CreateSession({});
         ASSERT_FALSE(session);
-        EXPECT_EQ(session.error(), make_error_code(Error::model_init_error));
+        EXPECT_EQ(session.error(), make_error_code(Error::model_cache_load_error));
+        session = CreateSession(m_model.m_modelData, m_model.m_weightsData);
+        ASSERT_FALSE(session);
+        EXPECT_EQ(session.error(), make_error_code(Error::model_cache_load_error));
+        EXPECT_EQ(CachedFiles(), corruptFiles);
     }
-#if defined(MLVC_PLATFORM_WINCLASSIC)
-    const auto cachedModel =
-        std::ranges::find_if(compiledFiles, [](const auto& file) { return file.first.filename() == "model.onnx"; });
-    ASSERT_NE(cachedModel, compiledFiles.end());
-    const auto modelPath = cachedModel->first;
+
     {
-        SCOPED_TRACE("Cache directory cannot be deleted");
-        // Windows streams hold the file without delete sharing.
-        const auto lockedFile = std::ofstream{ modelPath.parent_path() / "locked.bin" };
-        ASSERT_TRUE(lockedFile);
-        auto failedCache = PrepareModelCache();
-        ASSERT_FALSE(failedCache);
-        EXPECT_EQ(failedCache.error(), make_error_code(Error::io_error));
-        auto failedSession = CreateSession(m_model.m_modelData, m_model.m_weightsData);
-        ASSERT_FALSE(failedSession);
-        EXPECT_EQ(failedSession.error(), make_error_code(Error::io_error));
-    }
-    // A directory in place of the compiled model doesn't count as cached
-    ASSERT_TRUE(std::filesystem::create_directory(modelPath));
-#endif
-    {
-        SCOPED_TRACE("Compiled model missing: PrepareModelCache() compiles it again");
+        SCOPED_TRACE("Removed by Cleanup(): compiled again");
+        s_cache->Cleanup(std::chrono::seconds(0));
+        EXPECT_EQ(CountCacheFiles(), 0u);
+        const auto evicted = s_engine->ValidateModelCache(kCacheKey);
+        ASSERT_FALSE(evicted);
+        EXPECT_EQ(evicted.error(), make_error_code(Error::model_cache_error));
+        EXPECT_EQ(CountCacheFiles(), 0u);
         auto cached = PrepareModelCache();
         ASSERT_TRUE(cached) << cached.error().message();
         EXPECT_TRUE(cached.value());
         EXPECT_FALSE(CachedFiles().empty());
-#if defined(MLVC_PLATFORM_WINCLASSIC)
-        EXPECT_TRUE(std::filesystem::is_regular_file(modelPath));
-#endif
         auto session = CreateSession({});
         ASSERT_TRUE(session) << session.error().message();
         EXPECT_EQ(RunSession(*session.value()), std::error_code{});
-    }
-
-    {
-        SCOPED_TRACE("Corrupt model: counts as cached, kept without model data, recompiled with it");
-        ASSERT_NO_FATAL_FAILURE(CorruptCompiledModels());
-        auto cached = PrepareModelCache();
-        ASSERT_TRUE(cached) << cached.error().message();
-        EXPECT_TRUE(cached.value());
-        const auto corruptFiles = CachedFiles();
-        auto session = CreateSession({});
-        ASSERT_FALSE(session);
-        EXPECT_EQ(session.error(), make_error_code(Error::model_init_error));
-        EXPECT_EQ(CachedFiles(), corruptFiles);
-        session = CreateSession(m_model.m_modelData, m_model.m_weightsData);
-        ASSERT_TRUE(session) << session.error().message();
-        EXPECT_EQ(RunSession(*session.value()), std::error_code{});
-        session = CreateSession({});
-        ASSERT_TRUE(session) << session.error().message();
-    }
-
-    {
-        SCOPED_TRACE("Corrupt model that can't be recompiled: deleted");
-        ASSERT_NO_FATAL_FAILURE(CorruptCompiledModels());
-        auto session = CreateSession(kInvalidModel);
-        EXPECT_FALSE(session);
-        EXPECT_TRUE(std::filesystem::is_empty(m_cacheDir));
     }
 }
 
@@ -478,35 +476,72 @@ TEST_F(UnitTestInferenceEngine, ModelCacheFailuresReturnErrors)
         SCOPED_TRACE("Not cached, no model data");
         auto session = CreateSession({});
         ASSERT_FALSE(session);
-        EXPECT_EQ(session.error(), make_error_code(Error::model_init_error));
-        EXPECT_TRUE(std::filesystem::is_empty(m_cacheDir));
+        EXPECT_EQ(session.error(), make_error_code(Error::model_cache_error));
+        EXPECT_EQ(CountCacheFiles(), 0u);
     }
 
     {
         SCOPED_TRACE("Invalid model data");
         auto cached = s_engine->PrepareModelCache(m_model.m_name, kInvalidModel, {}, kCacheKey);
-        EXPECT_FALSE(cached);
+        ASSERT_FALSE(cached);
+        EXPECT_EQ(cached.error(), make_error_code(Error::model_compile_error));
         auto session = CreateSession(kInvalidModel);
-        EXPECT_FALSE(session);
-        EXPECT_TRUE(std::filesystem::is_empty(m_cacheDir));
+        ASSERT_FALSE(session);
+        EXPECT_EQ(session.error(), make_error_code(Error::model_compile_error));
+        EXPECT_EQ(CountCacheFiles(), 0u);
     }
 
     {
         SCOPED_TRACE("Unwritable model cache");
-        const auto blockingFile = m_cacheDir / "file";
+        ASSERT_GT(std::filesystem::remove_all(s_cacheDir), 0u);
         {
-            const auto file = std::ofstream{ blockingFile };
+            const auto file = std::ofstream{ s_cacheDir };
             ASSERT_TRUE(file);
         }
-        ModelCache::Instance().SetRootCacheDir({});
-        ModelCache::Instance().SetRootCacheDir(blockingFile / "models");
 
         auto cached = PrepareModelCache();
         ASSERT_FALSE(cached);
-        EXPECT_EQ(cached.error(), make_error_code(Error::io_error));
+        EXPECT_EQ(cached.error(), make_error_code(Error::model_cache_error));
 
         auto session = CreateSession(m_model.m_modelData, m_model.m_weightsData);
         ASSERT_FALSE(session);
-        EXPECT_EQ(session.error(), make_error_code(Error::io_error));
+        EXPECT_EQ(session.error(), make_error_code(Error::model_cache_error));
     }
+}
+
+TEST_F(UnitTestInferenceEngine, ModelCacheValidationFailuresAreClassified)
+{
+    if (!SupportsModelCache(s_engine->GetInfo())) {
+        GTEST_SKIP() << "The inference engine has no model cache";
+    }
+    const auto prepared = PrepareModelCache();
+    ASSERT_TRUE(prepared) << prepared.error().message();
+    ASSERT_TRUE(prepared.value());
+    const auto compiledFiles = CachedFiles();
+    auto damagedEntries = size_t{};
+    for (const auto& entry : std::filesystem::directory_iterator(s_cacheDir / "models")) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        auto manifest = std::ofstream{ entry.path() / kManifestFilename, std::ios::binary | std::ios::trunc };
+        ASSERT_TRUE(manifest);
+        manifest << "{invalid";
+        manifest.close();
+        ASSERT_TRUE(manifest);
+        ++damagedEntries;
+    }
+    ASSERT_EQ(damagedEntries, 1u);
+    const auto validated = s_engine->ValidateModelCache(kCacheKey);
+    ASSERT_FALSE(validated);
+    EXPECT_EQ(validated.error(), make_error_code(Error::model_cache_error));
+    const auto preparedAgain = PrepareModelCache();
+    ASSERT_FALSE(preparedAgain);
+    EXPECT_EQ(preparedAgain.error(), make_error_code(Error::model_cache_error));
+    const auto cachedOnly = CreateSession({});
+    ASSERT_FALSE(cachedOnly);
+    EXPECT_EQ(cachedOnly.error(), make_error_code(Error::model_cache_error));
+    const auto withInputs = CreateSession(m_model.m_modelData, m_model.m_weightsData);
+    ASSERT_FALSE(withInputs);
+    EXPECT_EQ(withInputs.error(), make_error_code(Error::model_cache_error));
+    EXPECT_EQ(CachedFiles(), compiledFiles);
 }

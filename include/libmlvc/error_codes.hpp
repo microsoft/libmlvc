@@ -46,6 +46,10 @@ enum class Error : int {
     unsupported_platform_error = 21,
     windows_app_runtime_unavailable_error = 22,
     incompatible_ep_version_error = 23,
+    // Model cache pipeline errors
+    model_cache_error = 24,
+    model_compile_error = 25,
+    model_cache_load_error = 26,
 };
 
 /// Returns the `std::error_category` used by libmlvc error codes.

@@ -59,6 +59,12 @@ class LibMlvcErrorCategory final : public std::error_category {
             return "Windows App Runtime unavailable or below minimum version";
         case Error::incompatible_ep_version_error:
             return "incompatible execution provider version error";
+        case Error::model_cache_error:
+            return "model cache error";
+        case Error::model_compile_error:
+            return "model compilation error";
+        case Error::model_cache_load_error:
+            return "model cache load error";
         default:
             MLVC_ASSERT(false);
             return "unknown error code";

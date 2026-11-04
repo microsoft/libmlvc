@@ -8,8 +8,11 @@
 
 namespace libmlvc {
 
+class ModelCache;
+
 struct CoreMlEngineParams {
     ComputeUnit computeUnit{ ComputeUnit::NPU };
+    std::shared_ptr<ModelCache> modelCache{};
 };
 
 expected<std::unique_ptr<IInferenceEngine>> MakeCoreMlEngine(const CoreMlEngineParams& params);

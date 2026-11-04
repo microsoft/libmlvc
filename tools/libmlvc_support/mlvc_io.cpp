@@ -314,4 +314,18 @@ expected<std::vector<MlvcAccessUnit>> ReadMlvcAccessUnits(const std::filesystem:
     return accessUnits;
 }
 
+expected<void> WriteMlvcAccessUnits(const std::filesystem::path& filename, const std::span<const MlvcAccessUnit> accessUnits)
+{
+    auto writer = MlvcWriter::OpenFile(filename);
+    if (!writer) {
+        return writer.error();
+    }
+    for (const auto& accessUnit : accessUnits) {
+        if (auto ret = writer->Write(accessUnit.data); !ret) {
+            return ret.error();
+        }
+    }
+    return writer->Close();
+}
+
 }  // namespace libmlvc

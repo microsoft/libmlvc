@@ -88,12 +88,11 @@ struct MinNpuDriver {
 };
 
 constexpr MinNpuDriver MIN_NPU_DRIVERS[] = {
-    { VENDOR_INTEL, CPU_SERIES_LUNAR_LAKE, "32.0.100.4297" },
+    { VENDOR_INTEL, CPU_SERIES_LUNAR_LAKE, "32.0.100.4023" },
     { VENDOR_INTEL, CPU_SERIES_PANTHER_LAKE, "32.0.100.4621" },
     { VENDOR_QUALCOMM, CPU_SERIES_SNAPDRAGON_X1, "30.0.140.1000" },
 };
 
-// Fails if the current platform's NPU driver is below the minimum required version.
 expected<void> CheckMinNpuDriverVersion()
 {
     const auto& platform = GetPlatformInfo();
@@ -185,7 +184,7 @@ MlvcManagerImpl::MlvcManagerImpl(const ManagerParams& params)
     : m_params(params)
     , m_info{
         .enableModelCache = params.enableModelCache,
-        .enableSessionPreloading = params.enableSessionPreloading,
+        .sessionPreloadMode = params.sessionPreloadMode,
     }
 {
     if (m_params.cacheDir.empty()) {
@@ -212,9 +211,9 @@ expected<void> MlvcManagerImpl::Initialize(const std::filesystem::path& bundlesD
 
     MLVC_LOG_INFO(
         "Initializing MlvcManager from bundles dir: compute_unit=%s, enable_model_cache=%d, "
-        "enable_session_preloading=%d, versions=[%s]",
-        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionPreloading,
-        MlvcVersions2Str(selectedVersions).c_str());
+        "session_preload_mode=%s, versions=[%s]",
+        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache,
+        SessionPreloadModeToString(m_params.sessionPreloadMode), MlvcVersions2Str(selectedVersions).c_str());
 
     if (!IsPlatformSupported()) {
         MLVC_LOG_ERROR("Platform is not supported for MLVC");
@@ -232,8 +231,8 @@ expected<void> MlvcManagerImpl::Initialize(const std::filesystem::path& bundlesD
     if (cancelToken.IsCancelled()) {
         return make_error_code(Error::operation_cancelled);
     }
-    auto bundleBlobs = LoadModelBundles(bundlesDir.empty() ? GetDefaultModelBundlesDir() : bundlesDir, selectedVersions,
-                                        m_inferenceEngine->GetInfo());
+    auto bundleBlobs = ReadBundleBlobs(bundlesDir.empty() ? GetDefaultModelBundlesDir() : bundlesDir, selectedVersions,
+                                       m_inferenceEngine->GetInfo());
     if (!bundleBlobs) {
         return bundleBlobs.error();
     }
@@ -253,8 +252,9 @@ expected<void> MlvcManagerImpl::Initialize(std::span<const std::span<const std::
         return make_error_code(Error::invalid_argument);
     }
     MLVC_LOG_INFO(
-        "Initializing MlvcManager from blobs: compute_unit=%s, enable_model_cache=%d, enable_session_preloading=%d",
-        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache, m_params.enableSessionPreloading);
+        "Initializing MlvcManager from blobs: compute_unit=%s, enable_model_cache=%d, session_preload_mode=%s",
+        ComputeUnitToString(m_params.computeUnit), m_params.enableModelCache,
+        SessionPreloadModeToString(m_params.sessionPreloadMode));
 
     if (!IsPlatformSupported()) {
         MLVC_LOG_ERROR("Platform is not supported for MLVC");
@@ -285,13 +285,13 @@ std::vector<MlvcVersion> MlvcManagerImpl::GetAvailableVersions() const
 expected<Capabilities> MlvcManagerImpl::GetCapabilities(const MlvcVersion mlvcVersion) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetCapabilities();
+    return m_bundles.at(mlvcVersion)->GetCapabilities();
 }
 
 expected<EncoderConfig> MlvcManagerImpl::GetDefaultEncoderConfig(const MlvcVersion mlvcVersion) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetDefaultEncoderConfig();
+    return m_bundles.at(mlvcVersion)->GetDefaultEncoderConfig();
 }
 
 expected<std::unique_ptr<MlvcEncoderImpl>> MlvcManagerImpl::CreateEncoder(const EncoderConfig& config) const
@@ -303,6 +303,9 @@ expected<std::unique_ptr<MlvcEncoderImpl>> MlvcManagerImpl::CreateEncoder(const 
     if (auto ret = encoder->Initialize(config); !ret) {
         MLVC_LOG_ERROR("Failed to initialize encoder: %s", ret.error().message().c_str());
         return ret.error();
+    }
+    if (m_params.sessionPreloadMode == SessionPreloadMode::ON_FIRST_USE) {
+        m_bundles.at(config.mlvcVersion)->PreloadSessionsInBackground();
     }
     return encoder;
 }
@@ -334,48 +337,48 @@ bool MlvcManagerImpl::IsVersionAvailable(const MlvcVersion mlvcVersion) const
 expected<std::string> MlvcManagerImpl::GetOptimalModelId(const MlvcVersion mlvcVersion, const int width, const int height) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetOptimalModelId(width, height);
+    return m_bundles.at(mlvcVersion)->GetOptimalModelId(width, height);
 }
 
 expected<ModelManifest> MlvcManagerImpl::GetModelManifest(const MlvcVersion mlvcVersion, const std::string& modelId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetModelManifest(modelId);
+    return m_bundles.at(mlvcVersion)->GetModelManifest(modelId);
 }
 
 expected<std::shared_ptr<const ModelMetadata>> MlvcManagerImpl::GetModelMetadata(const MlvcVersion mlvcVersion,
                                                                                  const std::string& modelId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetModelMetadata(modelId);
+    return m_bundles.at(mlvcVersion)->GetModelMetadata(modelId);
 }
 
 expected<std::shared_ptr<const ScaleDecoderData>> MlvcManagerImpl::GetScaleDecoderData(const MlvcVersion mlvcVersion,
                                                                                        const std::string& modelId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetScaleDecoderData(modelId);
+    return m_bundles.at(mlvcVersion)->GetScaleDecoderData(modelId);
 }
 
 expected<std::shared_ptr<const GaussianCoderPmf>> MlvcManagerImpl::GetGaussianPmf(const MlvcVersion mlvcVersion,
                                                                                   const std::string& modelId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetGaussianPmf(modelId);
+    return m_bundles.at(mlvcVersion)->GetGaussianPmf(modelId);
 }
 
 expected<std::shared_ptr<const BitEstimatorPmf>> MlvcManagerImpl::GetBitEstimatorPmf(const MlvcVersion mlvcVersion,
                                                                                      const std::string& modelId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetBitEstimatorPmf(modelId);
+    return m_bundles.at(mlvcVersion)->GetBitEstimatorPmf(modelId);
 }
 
 expected<InferenceSessionPtr> MlvcManagerImpl::GetInferenceSession(const MlvcVersion mlvcVersion,
                                                                    const std::string& modelId, const ModelPartId partId) const
 {
     if (auto ret = CheckInitialized(mlvcVersion); !ret) return ret.error();
-    return m_bundles.at(mlvcVersion).GetInferenceSession(modelId, partId);
+    return m_bundles.at(mlvcVersion)->GetInferenceSession(modelId, partId);
 }
 
 expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
@@ -384,7 +387,6 @@ expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
     if (progressCallback) {
         progressCallback(StatusMessage{ "Setting up inference engine" });
     }
-    ModelCache::Instance().SetRootCacheDir(m_params.cacheDir / "models");
 
     ComputeUnit computeUnit = m_params.computeUnit;
     if (computeUnit == ComputeUnit::AUTO) {
@@ -421,12 +423,23 @@ expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
             ToUpper(ComputeUnitToString(computeUnit)).c_str());
     }
 
+    if (m_params.enableModelCache) {
+        auto cache = ModelCache::Create(m_params.cacheDir / "models");
+        if (!cache) {
+            MLVC_LOG_ERROR("Failed to create model cache: %s", cache.error().message().c_str());
+            return cache.error();
+        }
+        m_modelCache = std::move(cache.value());
+    }
+
 #if defined(MLVC_PLATFORM_WINCLASSIC)
     auto modelType = ModelType::ONNX;
-    WinMlEngineParams engineParams{};
-    engineParams.computeUnit = computeUnit;
-    engineParams.onnxExecutionProvider = ResolveOnnxExecutionProvider(computeUnit);
-    engineParams.initMode = m_params.winmlInitMode;
+    const WinMlEngineParams engineParams{
+        .initMode = m_params.winmlInitMode,
+        .computeUnit = computeUnit,
+        .onnxExecutionProvider = ResolveOnnxExecutionProvider(computeUnit),
+        .modelCache = m_modelCache,
+    };
     auto engine = MakeWinMlEngine(engineParams, cancelToken, progressCallback);
     if (!engine) {
         MLVC_LOG_ERROR("Failed to create WinML inference engine: %s", engine.error().message().c_str());
@@ -436,8 +449,10 @@ expected<void> MlvcManagerImpl::InitInferenceEngine(CancelToken cancelToken,
 
 #elif defined(MLVC_PLATFORM_APPLE)
     auto modelType = ModelType::COREML;
-    CoreMlEngineParams engineParams{};
-    engineParams.computeUnit = computeUnit;
+    const CoreMlEngineParams engineParams{
+        .computeUnit = computeUnit,
+        .modelCache = m_modelCache,
+    };
     auto engine = MakeCoreMlEngine(engineParams);
     if (!engine) {
         MLVC_LOG_ERROR("Failed to create CoreML inference engine: %s", engine.error().message().c_str());
@@ -480,7 +495,24 @@ expected<void> MlvcManagerImpl::LoadBundles(std::vector<std::vector<std::byte>>&
 expected<void> MlvcManagerImpl::LoadBundles(std::span<const std::span<const std::byte>> bundleBlobs,
                                             CancelToken cancelToken, const InitializeProgressCallback& progressCallback)
 {
-    std::map<MlvcVersion, ModelBundle> bundles;
+    auto cleanupGuard = ScopeExit{ [this]() noexcept {
+        if (m_modelCache) {
+            m_modelCache->Cleanup();
+        }
+    } };
+
+    // Create a worker for sessions deferred until first use
+    if (m_params.sessionPreloadMode == SessionPreloadMode::ON_FIRST_USE) {
+        auto pool = ThreadPool::Create(1);
+        if (!pool) {
+            MLVC_LOG_ERROR("Failed to create session creation thread pool: %s", pool.error().message().c_str());
+            return pool.error();
+        }
+        m_sessionCreationPool = std::move(pool.value());
+    }
+
+    // Load bundles without exposing them to callers yet
+    std::map<MlvcVersion, std::unique_ptr<ModelBundle>> bundles;
     for (const auto& bundleBlob : bundleBlobs) {
         const auto index = bundles.size() + 1;
         MLVC_LOG_INFO("Loading model bundle %zu/%zu (%.1lf MB)...", index, bundleBlobs.size(),
@@ -490,13 +522,15 @@ expected<void> MlvcManagerImpl::LoadBundles(std::span<const std::span<const std:
             return make_error_code(Error::operation_cancelled);
         }
 
-        ModelBundle bundle(*m_inferenceEngine, m_params.enableModelCache, m_params.enableSessionPreloading);
-        if (auto ret = bundle.Initialize(bundleBlob, cancelToken, progressCallback); !ret) {
-            MLVC_LOG_ERROR("Failed to initialize bundle: %s", ret.error().message().c_str());
-            return ret.error();
+        auto bundle =
+            ModelBundle::Create(*m_inferenceEngine, m_sessionCreationPool.get(), bundleBlob, m_params.enableModelCache,
+                                m_params.sessionPreloadMode, cancelToken, progressCallback);
+        if (!bundle) {
+            MLVC_LOG_ERROR("Failed to initialize bundle: %s", bundle.error().message().c_str());
+            return bundle.error();
         }
 
-        const auto& manifest = bundle.GetManifest();
+        const auto& manifest = bundle.value()->GetManifest();
         if (bundles.contains(manifest.mlvcVersion)) {
             MLVC_LOG_ERROR("Duplicate MLVC version %s, bundle already loaded", manifest.mlvcVersion.ToString().c_str());
             return make_error_code(Error::invalid_argument);
@@ -507,7 +541,7 @@ expected<void> MlvcManagerImpl::LoadBundles(std::span<const std::span<const std:
                            ModelTypeToString(manifest.modelType), ModelTypeToString(m_info.modelType));
             return make_error_code(Error::invalid_argument);
         }
-        bundles.emplace(manifest.mlvcVersion, std::move(bundle));
+        bundles.emplace(manifest.mlvcVersion, std::move(bundle.value()));
         MLVC_LOG_INFO("Loading model bundle %zu/%zu completed", index, bundleBlobs.size());
     }
 
@@ -516,6 +550,22 @@ expected<void> MlvcManagerImpl::LoadBundles(std::span<const std::span<const std:
         return make_error_code(Error::invalid_argument);
     }
 
+    // Run cleanup now; do not let the guard repeat it after validation
+    if (m_modelCache) {
+        m_modelCache->Cleanup();
+    }
+    cleanupGuard.Release();
+
+    // Verify required cache entries
+    for (const auto& [version, bundle] : bundles) {
+        if (auto ret = bundle->ValidateModelCache(); !ret) {
+            MLVC_LOG_ERROR("Failed to validate model cache after cleanup for bundle %s: %s", version.ToString().c_str(),
+                           ret.error().message().c_str());
+            return ret.error();
+        }
+    }
+
+    // Publish the bundles only after the post-cleanup checks pass
     m_bundles = std::move(bundles);
     m_initialized.store(true, std::memory_order_release);
     MLVC_LOG_INFO("MLVC Manager initialized with %zu bundle(s)", m_bundles.size());

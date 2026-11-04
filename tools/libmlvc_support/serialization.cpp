@@ -164,6 +164,17 @@ boost::json::result_for<T, boost::json::value>::type TryGetOptional(const boost:
 
 // Enum FromString helpers
 
+SessionPreloadMode SessionPreloadModeFromString(const std::string& s)
+{
+    if (const auto mode = StringToSessionPreloadMode(s)) {
+        return mode.value();
+    }
+    if (!s.empty()) {
+        std::cerr << "Warning: Unknown SessionPreloadMode '" << s << "', defaulting to AT_INIT\n";
+    }
+    return SessionPreloadMode::AT_INIT;
+}
+
 InferenceBackend InferenceBackendFromString(const std::string& s)
 {
     if (s == "coreml") return InferenceBackend::COREML;
@@ -277,7 +288,7 @@ void tag_invoke(boost::json::value_from_tag, boost::json::value& jv, const Manag
 {
     jv = {
         { "enable_model_cache", c.enableModelCache },
-        { "enable_session_preloading", c.enableSessionPreloading },
+        { "session_preload_mode", SessionPreloadModeToString(c.sessionPreloadMode) },
         { "inference_backend", InferenceBackendToString(c.inferenceBackend) },
         { "model_type", ModelTypeToString(c.modelType) },
         { "compute_unit", ComputeUnitToString(c.computeUnit) },
@@ -464,7 +475,7 @@ tag_invoke(const boost::json::try_value_to_tag<ManagerInfo>&, const boost::json:
     const auto& obj = jv.as_object();
     return ManagerInfo{
         .enableModelCache = GetBool(obj, "enable_model_cache"),
-        .enableSessionPreloading = GetBool(obj, "enable_session_preloading"),
+        .sessionPreloadMode = SessionPreloadModeFromString(GetString(obj, "session_preload_mode")),
         .inferenceBackend = InferenceBackendFromString(GetString(obj, "inference_backend")),
         .modelType = ModelTypeFromString(GetString(obj, "model_type")),
         .computeUnit = ComputeUnitFromString(GetString(obj, "compute_unit")),

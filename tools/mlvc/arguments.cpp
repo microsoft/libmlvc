@@ -6,6 +6,7 @@
 #include <boost/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <charconv>
@@ -72,8 +73,8 @@ expected<int> CommonArguments::Parse(std::span<std::string_view> args)
         auto ret = ParseValue(args.subspan(1), enableModelCache);
         if (!ret) return ret.error();
         return 1 + ret.value();
-    } else if (args[0] == "--enable-session-preloading") {
-        auto ret = ParseValue(args.subspan(1), enableSessionPreloading);
+    } else if (args[0] == "--session-preload-mode") {
+        auto ret = ParseValue(args.subspan(1), sessionPreloadMode);
         if (!ret) return ret.error();
         return 1 + ret.value();
     } else if (args[0] == "--winml-init") {
@@ -114,12 +115,13 @@ void CommonArguments::PrintHelpImpl()
     std::cerr << "  --cache-dir                     Root cache directory (default: mlvc_cache in the platform app data "
                  "directory)\n";
     std::cerr << "  --enable-model-cache            Enable model cache (default: " << enableModelCache << ")\n";
-    std::cerr << "  --enable-session-preloading     Preload inference sessions (default: " << enableSessionPreloading
-              << ")\n";
+    std::cerr << "  --session-preload-mode          When to preload inference sessions: at-init, on-first-use, "
+                 "none (default: "
+              << SessionPreloadModeToString(sessionPreloadMode) << ")\n";
     std::cerr << "  --winml-init                    WinML init mode: appsdk, self-contained (default: "
               << WinMlInitModeToString(winmlInitMode) << ")\n";
-    std::cerr
-        << "  --log-level                     Specify log level: debug, info, warn, error, fatal (default: error)\n";
+    std::cerr << "  --log-level                     Specify log level: trace, debug, info, warn, error, fatal "
+                 "(default: error)\n";
     std::cerr << std::endl;
 }
 
@@ -182,7 +184,9 @@ expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, LogL
     }
 
     const auto value = args[0];
-    if (value == "debug") {
+    if (value == "trace") {
+        output = LogLevel::Trace;
+    } else if (value == "debug") {
         output = LogLevel::Debug;
     } else if (value == "info") {
         output = LogLevel::Info;
@@ -196,6 +200,22 @@ expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, LogL
         std::cerr << "Unknown value for --log-level (" << value << ")" << std::endl;
         return make_error_code(Error::command_line_parse_error);
     }
+    return 1;
+}
+
+expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, SessionPreloadMode& output)
+{
+    if (args.empty()) {
+        std::cerr << "Missing value for --session-preload-mode" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    auto parsed = StringToSessionPreloadMode(args[0]);
+    if (!parsed) {
+        std::cerr << "Unknown value for --session-preload-mode (" << args[0]
+                  << "), expected 'at-init', 'on-first-use' or 'none'" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    output = *parsed;
     return 1;
 }
 
@@ -324,6 +344,29 @@ expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, Vide
     return 1;
 }
 
+expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, InputClip& output)
+{
+    if (args.empty() || args[0].empty()) {
+        std::cerr << "Missing value for argument" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    // <file>:<width>x<height>, split at the last colon, so that paths with drive letters work
+    const auto value = args[0];
+    const auto colon = value.rfind(':');
+    const auto x = value.find('x', colon);
+    if (colon == 0 || x == std::string_view::npos) {
+        std::cerr << "Invalid input '" << value << "' (expected <file>:<width>x<height>)" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    std::array sizes{ value.substr(colon + 1, x - colon - 1), value.substr(x + 1) };
+    auto width = ParseValue(sizes, output.width);
+    if (!width) return width.error();
+    auto height = ParseValue(std::span(sizes).subspan(1), output.height);
+    if (!height) return height.error();
+    output.path = std::filesystem::path{ value.substr(0, colon) };
+    return 1;
+}
+
 expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, std::string& output)
 {
     if (args.empty()) {
@@ -363,6 +406,19 @@ expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, std:
     size_t i = 0;
     for (; i < args.size() && !args[i].starts_with("-"); ++i) {
         output.emplace_back(args[i]);
+    }
+    return static_cast<int>(i);
+}
+
+expected<int> CommonArguments::ParseValue(std::span<std::string_view> args, std::vector<InputClip>& output)
+{
+    output.clear();
+    size_t i = 0;
+    for (; i < args.size() && !args[i].starts_with("-"); ++i) {
+        InputClip clip;
+        auto ret = ParseValue(args.subspan(i), clip);
+        if (!ret) return ret.error();
+        output.push_back(std::move(clip));
     }
     return static_cast<int>(i);
 }
@@ -472,12 +528,16 @@ void BenchmarkArguments::Save(const std::filesystem::path& filename) const
     root["compute_unit"] = ComputeUnitToString(computeUnit);
     root["cache_dir"] = cacheDir.string();
     root["enable_model_cache"] = enableModelCache;
-    root["enable_session_preloading"] = enableSessionPreloading;
-    root["input_file"] = inputFile.string();
-    root["image_width"] = inputWidth;
-    root["image_height"] = inputHeight;
+    root["session_preload_mode"] = SessionPreloadModeToString(sessionPreloadMode);
+    boost::json::array clips;
+    for (const auto& input : inputs) {
+        clips.push_back({ { "path", input.path.string() }, { "width", input.width }, { "height", input.height } });
+    }
+    root["inputs"] = std::move(clips);
+    root["decoder_input_file"] = decoderInputFile.string();
     root["output_directory"] = outputDirectory.string();
     root["save_stats"] = saveStats;
+    root["save_decoder_input_file"] = saveDecoderInputFile.string();
     root["num_encoders"] = numEncoders;
     root["num_decoders"] = numDecoders;
     root["target_fps"] = targetFps;
@@ -502,15 +562,11 @@ void BenchmarkArguments::Save(const std::filesystem::path& filename) const
 expected<int> BenchmarkArguments::Parse(std::span<std::string_view> args)
 {
     if (args[0] == "--input") {
-        auto ret = ParseValue(args.subspan(1), inputFile);
+        auto ret = ParseValue(args.subspan(1), inputs);
         if (!ret) return ret.error();
         return 1 + ret.value();
-    } else if (args[0] == "--input-width") {
-        auto ret = ParseValue(args.subspan(1), inputWidth);
-        if (!ret) return ret.error();
-        return 1 + ret.value();
-    } else if (args[0] == "--input-height") {
-        auto ret = ParseValue(args.subspan(1), inputHeight);
+    } else if (args[0] == "--decoder-input") {
+        auto ret = ParseValue(args.subspan(1), decoderInputFile);
         if (!ret) return ret.error();
         return 1 + ret.value();
     } else if (args[0] == "--output-dir") {
@@ -520,6 +576,10 @@ expected<int> BenchmarkArguments::Parse(std::span<std::string_view> args)
     } else if (args[0] == "--save-stats") {
         saveStats = true;
         return 1;
+    } else if (args[0] == "--save-decoder-input") {
+        auto ret = ParseValue(args.subspan(1), saveDecoderInputFile);
+        if (!ret) return ret.error();
+        return 1 + ret.value();
     } else if (args[0] == "--num-encoders") {
         auto ret = ParseValue(args.subspan(1), numEncoders);
         if (!ret) return ret.error();
@@ -573,17 +633,16 @@ expected<void> BenchmarkArguments::Verify()
     if (auto ret = EncoderConfigArguments::Verify(); !ret) {
         return ret.error();
     }
-    if (inputFile.empty()) {
+    if (inputs.empty()) {
         std::cerr << "Missing value for --input" << std::endl;
         return make_error_code(Error::command_line_parse_error);
     }
-    if (inputWidth <= 0 || inputWidth % 2 != 0) {
-        std::cerr << "Invalid value for --input-width (must be positive and even)" << std::endl;
-        return make_error_code(Error::command_line_parse_error);
-    }
-    if (inputHeight <= 0 || inputHeight % 2 != 0) {
-        std::cerr << "Invalid value for --input-height (must be positive and even)" << std::endl;
-        return make_error_code(Error::command_line_parse_error);
+    for (const auto& input : inputs) {
+        if (input.width <= 0 || input.width % 2 != 0 || input.height <= 0 || input.height % 2 != 0) {
+            std::cerr << "Invalid value for --input " << input.path.string() << ':' << input.width << 'x'
+                      << input.height << " (width and height must be positive and even)" << std::endl;
+            return make_error_code(Error::command_line_parse_error);
+        }
     }
     if (outputDirectory.empty()) {
         std::cerr << "Missing value for --output-dir" << std::endl;
@@ -599,6 +658,14 @@ expected<void> BenchmarkArguments::Verify()
     }
     if (numEncoders == 0 && numDecoders == 0) {
         std::cerr << "At least one encoder or decoder must be specified" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    if (!decoderInputFile.empty() && numDecoders == 0) {
+        std::cerr << "--decoder-input requires --num-decoders" << std::endl;
+        return make_error_code(Error::command_line_parse_error);
+    }
+    if (!saveDecoderInputFile.empty() && (numDecoders == 0 || !decoderInputFile.empty())) {
+        std::cerr << "--save-decoder-input requires --num-decoders and no --decoder-input" << std::endl;
         return make_error_code(Error::command_line_parse_error);
     }
     if (targetFps <= 0.0) {
@@ -633,12 +700,13 @@ void BenchmarkArguments::PrintHelpImpl()
 {
     EncoderConfigArguments::PrintHelpImpl();
     std::cerr << "Command-Specific Arguments:\n";
-    std::cerr << "  --input                 Input file (*.nv12, *.yuv, *.nv12.gz, *.yuv.gz) (default: " << inputFile
-              << ")\n";
-    std::cerr << "  --input-width           Input frame width (default: " << inputWidth << ")\n";
-    std::cerr << "  --input-height          Input frame height (default: " << inputHeight << ")\n";
+    std::cerr << "  --input                 Inputs: <file>:<width>x<height> ... (*.nv12, *.yuv, *.nv12.gz, *.yuv.gz)\n";
+    std::cerr << "                          played in turn, e.g. to switch resolution (default: "
+              << inputs.front().path.string() << ':' << inputs.front().width << 'x' << inputs.front().height << ")\n";
+    std::cerr << "  --decoder-input         Decoder input file (*.mlvc), instead of pre-encoding --input\n";
     std::cerr << "  --output-dir            Specify the output directory (default: " << outputDirectory << ")\n";
     std::cerr << "  --save-stats            Save per-frame statistics to stats.json (flag)\n";
+    std::cerr << "  --save-decoder-input    File (*.mlvc) to save the pre-encoded decoder input to\n";
     std::cerr << "  --num-encoders          Specify the number of encoders to run in parallel (default: " << numEncoders
               << ")\n";
     std::cerr << "  --num-decoders          Specify the number of decoders to run in parallel (default: " << numDecoders

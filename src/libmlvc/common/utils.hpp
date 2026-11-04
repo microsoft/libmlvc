@@ -10,8 +10,33 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace libmlvc {
+
+template <typename Function>
+class [[nodiscard]] ScopeExit {
+public:
+    explicit ScopeExit(Function action) : m_action(std::move(action)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ScopeExit(ScopeExit&&) = delete;
+    ScopeExit& operator=(ScopeExit&&) = delete;
+
+    ~ScopeExit() noexcept
+    {
+        // Cleanup callbacks must not throw.
+        if (m_active) {
+            m_action();
+        }
+    }
+
+    void Release() noexcept { m_active = false; }
+
+private:
+    Function m_action;
+    bool m_active{ true };
+};
 
 class ManualOpTimer {
 public:

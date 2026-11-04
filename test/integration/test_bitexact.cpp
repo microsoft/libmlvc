@@ -431,6 +431,7 @@ inline std::string GetDefaultReferenceName()
         || GetPlatformInfo().cpuSeries == CPU_SERIES_M3 || GetPlatformInfo().cpuSeries == CPU_SERIES_M4) {
         return "apple_m1_npu";
     }
+    // M5 and newer, and A18 (MacBook Neo)
     return "apple_m5_npu";
 #elif defined(MLVC_PLATFORM_WINCLASSIC) && defined(MLVC_ARCH_ARM64)
     // Qualcomm NPU
@@ -555,7 +556,7 @@ public:
         MlvcParser parser;
 
         for (int frameId = 0; frameId < static_cast<int>(frameChecks.value().size()); frameId++) {
-            MLVC_LOG_DEBUG("Processing frame %d ...", frameId);
+            MLVC_LOG_TRACE("Processing frame %d ...", frameId);
 
             if (auto it = m_numTemporalLayersSchedule.find(frameId); it != m_numTemporalLayersSchedule.end()) {
                 config.value().numTemporalLayers = it->second;
@@ -635,7 +636,7 @@ public:
                 break;
             }
             const auto& frameData = frames.value()[frameId].data;
-            MLVC_LOG_DEBUG("Processing frame %zu ...", frameId);
+            MLVC_LOG_TRACE("Processing frame %zu ...", frameId);
             const auto nalus = SplitToNalus(frameData);
             if (!nalus) {
                 MLVC_LOG_ERROR("Failed to split NALUs: %s", nalus.error().message().c_str());
@@ -692,7 +693,7 @@ protected:
 
         ManagerParams managerParams;
         managerParams.computeUnit = GetTestConfig().computeUnit;
-        managerParams.enableSessionPreloading = false;
+        managerParams.sessionPreloadMode = SessionPreloadMode::NONE;
         managerParams.winmlInitMode = GetTestConfig().winmlInitMode;
         m_manager = std::make_shared<MlvcManagerImpl>(managerParams);
         auto ret = m_manager->Initialize({}, std::array{ m_mlvcVersion });

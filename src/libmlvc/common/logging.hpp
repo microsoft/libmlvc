@@ -8,9 +8,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <source_location>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -18,6 +20,7 @@
     {                                                                                                \
         libmlvc::Logger::Instance().Log(level, std::source_location::current(), fmt, ##__VA_ARGS__); \
     }
+#define MLVC_LOG_TRACE(...) MLVC_LOG_IMPL(libmlvc::LogLevel::Trace, ##__VA_ARGS__)
 #define MLVC_LOG_DEBUG(...) MLVC_LOG_IMPL(libmlvc::LogLevel::Debug, ##__VA_ARGS__)
 #define MLVC_LOG_INFO(...) MLVC_LOG_IMPL(libmlvc::LogLevel::Info, ##__VA_ARGS__)
 #define MLVC_LOG_WARN(...) MLVC_LOG_IMPL(libmlvc::LogLevel::Warn, ##__VA_ARGS__)
@@ -32,6 +35,10 @@
 namespace libmlvc {
 
 void DefaultLogHandler(LogLevel level, const std::source_location& loc, std::string_view msg) noexcept;
+
+// Converts a path to UTF-8 for logging without throwing: on Windows, path::string() throws for characters outside
+// the ANSI code page and path::u8string() for unpaired surrogates, which become U+FFFD here.
+std::string ToLogString(const std::filesystem::path& path) noexcept;
 
 class Logger {
 public:

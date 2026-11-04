@@ -3,6 +3,7 @@
 
 #include "libmlvc/codec/bundle.hpp"
 #include "libmlvc/common/tar.hpp"
+#include "libmlvc/common/thread_pool.hpp"
 #include "libmlvc/schema/bundle.hpp"
 #include "support/test_config.hpp"
 
@@ -12,11 +13,26 @@
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <future>
 #include <initializer_list>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 using namespace libmlvc;
@@ -99,7 +115,7 @@ expected<BundleManifest> ParseManifest(const boost::json::value& manifest)
 expected<std::vector<BundleManifest>> LoadManifests(std::span<const MlvcVersion> versions,
                                                     const InferenceEngineInfo& engineInfo)
 {
-    const auto bundles = LoadModelBundles(GetDefaultModelBundlesDir(), versions, engineInfo);
+    const auto bundles = ReadBundleBlobs(GetDefaultModelBundlesDir(), versions, engineInfo);
     if (!bundles) return bundles.error();
     std::vector<BundleManifest> manifests;
     for (const auto& bundle : bundles.value()) {
@@ -111,6 +127,24 @@ expected<std::vector<BundleManifest>> LoadManifests(std::span<const MlvcVersion>
     }
     return manifests;
 }
+
+class ScopedTempDir {
+public:
+    ScopedTempDir()
+        : path(std::filesystem::temp_directory_path()
+               / ("libmlvc_bundles_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+    {
+        std::filesystem::create_directory(path);
+    }
+
+    ~ScopedTempDir()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+
+    std::filesystem::path path;
+};
 }  // namespace
 
 TEST(UnitTestBundle, ParsesCompleteManifest)
@@ -240,6 +274,12 @@ TEST(UnitTestBundle, RejectsMalformedJson)
         ASSERT_FALSE(result);
         EXPECT_EQ(result.error(), make_error_code(Error::json_parse_error));
     }
+
+    // Overflows the stack without Boost.JSON's depth limit
+    const auto tooDeep = std::string(100000, '[') + std::string(100000, ']');
+    const auto result = BundleManifest::FromJsonBuffer(std::as_bytes(std::span{ tooDeep.data(), tooDeep.size() }));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), make_error_code(Error::json_parse_error));
 }
 
 TEST(UnitTestBundle, RejectsMissingRequiredFields)
@@ -325,7 +365,7 @@ TEST(UnitTestBundle, RejectsInvalidManifestFields)
     }
 }
 
-TEST(UnitTestLoadModelBundles, SelectsBundleForInferenceEngine)
+TEST(UnitTestReadBundleBlobs, SelectsBundleForInferenceEngine)
 {
     struct TestCase {
         InferenceEngineInfo engineInfo;
@@ -349,10 +389,446 @@ TEST(UnitTestLoadModelBundles, SelectsBundleForInferenceEngine)
     }
 }
 
-TEST(UnitTestLoadModelBundles, ReportsMissingVersion)
+TEST(UnitTestReadBundleBlobs, ReportsMissingVersion)
 {
     const InferenceEngineInfo engineInfo{ .inferenceBackend = InferenceBackend::COREML };
     const auto manifests = LoadManifests(std::array{ MlvcVersion{ 99, 99 } }, engineInfo);
     ASSERT_FALSE(manifests);
     EXPECT_EQ(manifests.error(), make_error_code(Error::general_failure));
+}
+
+TEST(UnitTestReadBundleBlobs, HandlesFileNamesOutsideCodePage)
+{
+    // On Windows, path::string() throws for names that the ANSI code page can't represent
+    const InferenceEngineInfo engineInfo{ .inferenceBackend = InferenceBackend::COREML };
+    const std::array versions{ GetTestConfig().mlvcVersion };
+    const auto original = ReadBundleBlobs(GetDefaultModelBundlesDir(), versions, engineInfo);
+    ASSERT_TRUE(original) << original.error().message();
+    ASSERT_EQ(original->size(), 1u);
+    const auto& bundle = original->front();
+
+    const ScopedTempDir dir;
+    ASSERT_TRUE(std::ofstream(dir.path / std::filesystem::path(u8"\U0001F600.tar"), std::ios::binary)
+                    .write(reinterpret_cast<const char*>(bundle.data()), static_cast<std::streamsize>(bundle.size()))
+                    .good());
+    for (const auto* name : { u8"\U0001F600\U0001F600.tar", u8"\U0001F600.txt" }) {
+        ASSERT_TRUE((std::ofstream(dir.path / std::filesystem::path(name)) << "not a bundle").good());
+    }
+    const auto bundles = ReadBundleBlobs(dir.path, versions, engineInfo);
+    ASSERT_TRUE(bundles) << bundles.error().message();
+    ASSERT_EQ(bundles->size(), 1u);
+    EXPECT_TRUE(bundles->front() == bundle);
+}
+
+namespace {
+
+class FakeInferenceSession : public IInferenceSession {
+public:
+    expected<std::span<const std::string>> GetInputNames() override { return std::span<const std::string>{}; }
+    expected<std::span<const std::string>> GetOutputNames() override { return std::span<const std::string>{}; }
+    expected<InferenceTensorPtr> CreateTensor(const TensorIoType, std::string_view, const bool) override
+    {
+        return make_error_code(Error::general_failure);
+    }
+    expected<void> Run(const std::vector<InferenceTensorPtr>&, const std::vector<InferenceTensorPtr>&) override
+    {
+        return {};
+    }
+};
+
+// Holds the creation of sessions whose name starts with the blocked prefix until Release()
+class BlockingInferenceEngine : public IInferenceEngine {
+public:
+    struct Creation {
+        std::string name;
+        std::thread::id threadId;
+    };
+
+    explicit BlockingInferenceEngine(InferenceEngineInfo info) : m_info(std::move(info)) {}
+
+    expected<InferenceSessionPtr> CreateSession(std::string_view name, std::span<const std::byte>,
+                                                const std::map<std::string, std::span<const std::byte>>&,
+                                                std::string_view, const std::optional<std::string>&) override
+    {
+        std::unique_lock lock(m_mutex);
+        if (!m_failedPrefix.empty() && name.starts_with(m_failedPrefix)) {
+            m_failedCreations++;
+            return make_error_code(Error::general_failure);
+        }
+        if (!m_blockedPrefix.empty() && name.starts_with(m_blockedPrefix)) {
+            m_blockedCreations++;
+            m_cv.notify_all();
+            m_cv.wait(lock, [this] { return m_released; });
+        }
+        m_creations.push_back({ .name = std::string(name), .threadId = std::this_thread::get_id() });
+        m_cv.notify_all();
+        return std::make_shared<FakeInferenceSession>();
+    }
+
+    expected<void> ValidateModelCache(std::string_view) const override { return {}; }
+
+    expected<bool> PrepareModelCache(std::string_view, std::span<const std::byte>,
+                                     const std::map<std::string, std::span<const std::byte>>&, std::string_view) override
+    {
+        return false;
+    }
+
+    const InferenceEngineInfo& GetInfo() const override { return m_info; }
+
+    void Block(std::string prefix)
+    {
+        std::lock_guard lock(m_mutex);
+        m_blockedPrefix = std::move(prefix);
+    }
+
+    bool WaitUntilBlocked()
+    {
+        std::unique_lock lock(m_mutex);
+        return m_cv.wait_for(lock, std::chrono::seconds(10), [this] { return m_blockedCreations > 0; });
+    }
+
+    void Release()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_released = true;
+        }
+        m_cv.notify_all();
+    }
+
+    int GetBlockedCreations()
+    {
+        std::lock_guard lock(m_mutex);
+        return m_blockedCreations;
+    }
+
+    void Fail(std::string prefix)
+    {
+        std::lock_guard lock(m_mutex);
+        m_failedPrefix = std::move(prefix);
+    }
+
+    int GetFailedCreations()
+    {
+        std::lock_guard lock(m_mutex);
+        return m_failedCreations;
+    }
+
+    // Waits up to 10 s until at least `minCount` sessions are created, and returns the creations so far
+    std::vector<Creation> GetCreations(const size_t minCount = 0)
+    {
+        std::unique_lock lock(m_mutex);
+        m_cv.wait_for(lock, std::chrono::seconds(10), [&] { return m_creations.size() >= minCount; });
+        return m_creations;
+    }
+
+private:
+    InferenceEngineInfo m_info;
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::string m_blockedPrefix;
+    int m_blockedCreations = 0;
+    bool m_released = false;
+    std::string m_failedPrefix;
+    int m_failedCreations = 0;
+    std::vector<Creation> m_creations;
+};
+
+expected<std::unique_ptr<ModelBundle>> CreateTestBundle(IInferenceEngine& engine, const SessionPreloadMode mode,
+                                                        ThreadPool* sessionCreationPool = nullptr)
+{
+    const auto blobs =
+        ReadBundleBlobs(GetDefaultModelBundlesDir(), std::array{ GetTestConfig().mlvcVersion }, engine.GetInfo());
+    if (!blobs) return blobs.error();
+    if (blobs->size() != 1) return make_error_code(Error::invalid_argument);
+    return ModelBundle::Create(engine, sessionCreationPool, blobs->front(), false, mode, {}, nullptr);
+}
+
+std::string DecoderSessionName(const std::string& modelId)
+{
+    return modelId + "/" + ModelPartIdToString(ModelPartId::DECODER);
+}
+
+size_t NumSessions(const BundleManifest& manifest)
+{
+    size_t numSessions = 0;
+    for (const auto& model : manifest.modelManifests | std::views::values) {
+        numSessions += model.modelParts.size();
+    }
+    return numSessions;
+}
+
+class UnitTestModelBundleInBackground : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        auto pool = ThreadPool::Create(1);
+        ASSERT_TRUE(pool) << pool.error().message();
+        m_pool = std::move(pool.value());
+        auto bundle = CreateTestBundle(m_engine, SessionPreloadMode::ON_FIRST_USE, m_pool.get());
+        ASSERT_TRUE(bundle) << bundle.error().message();
+        m_bundle = std::move(bundle.value());
+    }
+
+    BlockingInferenceEngine m_engine{ InferenceEngineInfo{ .inferenceBackend = InferenceBackend::WINDOWSML,
+                                                           .onnxExecutionProvider = OnnxExecutionProvider::CPU } };
+    std::unique_ptr<ModelBundle> m_bundle;
+    std::unique_ptr<ThreadPool> m_pool;  // Declared after the bundle, so it stops before the bundle is destroyed
+
+    int Area(const std::string& modelId) const
+    {
+        const auto& metadata = m_bundle->GetManifest().modelMetadata.at(modelId);
+        return metadata->modelWidth * metadata->modelHeight;
+    }
+
+    std::string SmallestModelId() const
+    {
+        return std::ranges::min(m_bundle->GetManifest().modelManifests | std::views::keys, {},
+                                [this](const std::string& id) { return Area(id); });
+    }
+    std::string LargestModelId() const
+    {
+        return std::ranges::max(m_bundle->GetManifest().modelManifests | std::views::keys, {},
+                                [this](const std::string& id) { return Area(id); });
+    }
+};
+
+}  // namespace
+
+TEST(UnitTestModelBundle, SessionPreloadModeStrings)
+{
+    for (const auto& [mode, name] : { std::pair{ SessionPreloadMode::AT_INIT, "at-init" },
+                                      std::pair{ SessionPreloadMode::ON_FIRST_USE, "on-first-use" },
+                                      std::pair{ SessionPreloadMode::NONE, "none" } }) {
+        EXPECT_STREQ(SessionPreloadModeToString(mode), name);
+        const auto parsed = StringToSessionPreloadMode(name);
+        ASSERT_TRUE(parsed) << parsed.error().message();
+        EXPECT_EQ(parsed.value(), mode);
+    }
+
+    const auto unknown = StringToSessionPreloadMode("unknown");
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error(), make_error_code(Error::invalid_argument));
+}
+
+TEST(UnitTestModelBundle, CreatesSessionsWithoutBlockingOtherRequests)
+{
+    BlockingInferenceEngine engine(
+        { .inferenceBackend = InferenceBackend::WINDOWSML, .onnxExecutionProvider = OnnxExecutionProvider::CPU });
+    const auto bundle = CreateTestBundle(engine, SessionPreloadMode::NONE);
+    ASSERT_TRUE(bundle) << bundle.error().message();
+
+    const auto& models = bundle.value()->GetManifest().modelManifests;
+    ASSERT_GE(models.size(), 2u);
+    const auto& readyModelId = models.begin()->first;
+    const auto& blockedModelId = std::next(models.begin())->first;
+    const auto ready = bundle.value()->GetInferenceSession(readyModelId, ModelPartId::DECODER);
+    ASSERT_TRUE(ready) << ready.error().message();
+
+    engine.Block(blockedModelId + "/");
+    auto blockedRequests = std::vector<std::future<expected<InferenceSessionPtr>>>{};
+    for (int i = 0; i < 2; i++) {
+        blockedRequests.push_back(std::async(std::launch::async, [&] {
+            return bundle.value()->GetInferenceSession(blockedModelId, ModelPartId::DECODER);
+        }));
+    }
+    EXPECT_TRUE(engine.WaitUntilBlocked());
+
+    auto readyRequest = std::async(
+        std::launch::async, [&] { return bundle.value()->GetInferenceSession(readyModelId, ModelPartId::DECODER); });
+    const auto readyReturned = readyRequest.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    engine.Release();
+    EXPECT_TRUE(readyReturned) << "Request for a created session waited for another session's creation";
+    const auto readyAgain = readyRequest.get();
+    ASSERT_TRUE(readyAgain) << readyAgain.error().message();
+    EXPECT_EQ(readyAgain.value(), ready.value());
+
+    auto blockedSessions = std::vector<InferenceSessionPtr>{};
+    for (auto& request : blockedRequests) {
+        const auto session = request.get();
+        ASSERT_TRUE(session) << session.error().message();
+        blockedSessions.push_back(session.value());
+    }
+    EXPECT_EQ(blockedSessions.front(), blockedSessions.back());
+    EXPECT_EQ(engine.GetBlockedCreations(), 1);
+}
+
+TEST(UnitTestModelBundle, CreatesSessionsAtInitOrOnDemand)
+{
+    const InferenceEngineInfo info{ .inferenceBackend = InferenceBackend::WINDOWSML,
+                                    .onnxExecutionProvider = OnnxExecutionProvider::CPU };
+    BlockingInferenceEngine atInitEngine(info);
+    const auto atInit = CreateTestBundle(atInitEngine, SessionPreloadMode::AT_INIT);
+    ASSERT_TRUE(atInit) << atInit.error().message();
+    EXPECT_EQ(atInitEngine.GetCreations().size(), NumSessions(atInit.value()->GetManifest()));
+
+    BlockingInferenceEngine onDemandEngine(info);
+    const auto onDemand = CreateTestBundle(onDemandEngine, SessionPreloadMode::NONE);
+    ASSERT_TRUE(onDemand) << onDemand.error().message();
+    EXPECT_TRUE(onDemandEngine.GetCreations().empty());
+    const auto& modelId = onDemand.value()->GetManifest().modelManifests.begin()->first;
+    const auto session = onDemand.value()->GetInferenceSession(modelId, ModelPartId::DECODER);
+    ASSERT_TRUE(session) << session.error().message();
+    const auto creations = onDemandEngine.GetCreations();
+    ASSERT_EQ(creations.size(), 1u);
+    EXPECT_TRUE(creations.front().name.starts_with(DecoderSessionName(modelId)));
+    EXPECT_EQ(creations.front().threadId, std::this_thread::get_id());
+}
+
+TEST(UnitTestModelBundle, RequiresSessionCreationPoolInBackground)
+{
+    BlockingInferenceEngine engine(
+        { .inferenceBackend = InferenceBackend::WINDOWSML, .onnxExecutionProvider = OnnxExecutionProvider::CPU });
+    const auto blobs =
+        ReadBundleBlobs(GetDefaultModelBundlesDir(), std::array{ GetTestConfig().mlvcVersion }, engine.GetInfo());
+    ASSERT_TRUE(blobs) << blobs.error().message();
+    ASSERT_EQ(blobs->size(), 1u);
+    const auto bundle =
+        ModelBundle::Create(engine, nullptr, blobs->front(), false, SessionPreloadMode::ON_FIRST_USE, {}, nullptr);
+    ASSERT_FALSE(bundle);
+    EXPECT_EQ(bundle.error(), make_error_code(Error::invalid_argument));
+}
+
+TEST(UnitTestModelBundle, QueuesRequestedSessionFirst)
+{
+    // A pool without threads creates each session as it's queued, so the creations show the queue's order
+    const auto pool = ThreadPool::Create(0);
+    ASSERT_TRUE(pool) << pool.error().message();
+    BlockingInferenceEngine engine(
+        { .inferenceBackend = InferenceBackend::WINDOWSML, .onnxExecutionProvider = OnnxExecutionProvider::CPU });
+    const auto bundle = CreateTestBundle(engine, SessionPreloadMode::ON_FIRST_USE, pool.value().get());
+    ASSERT_TRUE(bundle) << bundle.error().message();
+
+    // An unknown session fails without queueing anything
+    const auto unknown = bundle.value()->GetInferenceSession("unknown", ModelPartId::DECODER);
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error(), make_error_code(Error::invalid_argument));
+    EXPECT_TRUE(engine.GetCreations().empty());
+
+    // As a decoder's first frame does, a request before any preload queues every session, its own first
+    const auto& modelId = bundle.value()->GetManifest().modelManifests.begin()->first;
+    const auto session = bundle.value()->GetInferenceSession(modelId, ModelPartId::DECODER);
+    ASSERT_TRUE(session) << session.error().message();
+    const auto creations = engine.GetCreations();
+    ASSERT_EQ(creations.size(), NumSessions(bundle.value()->GetManifest()));
+    EXPECT_TRUE(creations.front().name.starts_with(DecoderSessionName(modelId))) << creations.front().name;
+}
+
+TEST_F(UnitTestModelBundleInBackground, CreatesSessionsLargestFirst)
+{
+    // Every session of the bundle is created on one background thread, largest resolution first, and a model's
+    // encoder before its decoder
+    m_bundle->PreloadSessionsInBackground();
+    const auto& manifest = m_bundle->GetManifest();
+    const auto numSessions = NumSessions(manifest);
+    const auto creations = m_engine.GetCreations(numSessions);
+    ASSERT_EQ(creations.size(), numSessions);
+    std::vector<std::string> createdNames;
+    for (const auto& creation : creations) {
+        EXPECT_NE(creation.threadId, std::this_thread::get_id());
+        EXPECT_EQ(creation.threadId, creations.front().threadId);
+        createdNames.push_back(creation.name);
+    }
+    const auto area = [this](const std::string& sessionName) {
+        return Area(sessionName.substr(0, sessionName.find('/')));
+    };
+    EXPECT_TRUE(std::ranges::is_sorted(createdNames, std::ranges::greater{}, area))
+        << ::testing::PrintToString(createdNames);
+    for (const auto& modelId : manifest.modelManifests | std::views::keys) {
+        const auto created = [&](const ModelPartId partId) {
+            return std::ranges::find_if(createdNames, [&](const std::string& name) {
+                return name.starts_with(modelId + "/" + ModelPartIdToString(partId));
+            });
+        };
+        EXPECT_LT(created(ModelPartId::ENCODER), created(ModelPartId::DECODER)) << modelId;
+    }
+}
+
+TEST_F(UnitTestModelBundleInBackground, RunsRequestedSessionNext)
+{
+    const auto smallest = SmallestModelId();
+    const auto largest = LargestModelId();
+    ASSERT_NE(largest, smallest);
+
+    // Hold the first creation, of the largest encoder, so the other sessions stay queued
+    m_engine.Block(largest + "/");
+    m_bundle->PreloadSessionsInBackground();
+    ASSERT_TRUE(m_engine.WaitUntilBlocked());
+
+    // The request has time to move its session to the front of the queue before the held creation ends
+    auto request =
+        std::async(std::launch::async, [&] { return m_bundle->GetInferenceSession(smallest, ModelPartId::DECODER); });
+    EXPECT_EQ(request.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout);
+    m_engine.Release();
+    const auto session = request.get();
+    ASSERT_TRUE(session) << session.error().message();
+
+    const auto creations = m_engine.GetCreations(2);
+    ASSERT_GE(creations.size(), 2u);
+    EXPECT_TRUE(creations[0].name.starts_with(largest + "/")) << creations[0].name;
+    EXPECT_TRUE(creations[1].name.starts_with(DecoderSessionName(smallest))) << creations[1].name;
+}
+
+TEST_F(UnitTestModelBundleInBackground, QueuesEachSessionOnce)
+{
+    const auto& manifest = m_bundle->GetManifest();
+    const auto& modelId = manifest.modelManifests.begin()->first;
+
+    auto preload = std::async(std::launch::async, [&] { m_bundle->PreloadSessionsInBackground(); });
+    auto another = std::async(std::launch::async, [&] { m_bundle->PreloadSessionsInBackground(); });
+    auto request =
+        std::async(std::launch::async, [&] { return m_bundle->GetInferenceSession(modelId, ModelPartId::DECODER); });
+    preload.get();
+    another.get();
+    const auto session = request.get();
+    ASSERT_TRUE(session) << session.error().message();
+    m_bundle->PreloadSessionsInBackground();
+
+    // The pool's one thread runs a LOW-priority task after every task queued before it
+    const auto drained = m_pool->Submit("drained", []() -> expected<void> { return {}; }, ThreadPool::Priority::LOW);
+    ASSERT_EQ(drained->Wait(), ThreadPool::Task::Status::COMPLETED);
+    std::vector<std::string> createdNames;
+    for (const auto& creation : m_engine.GetCreations()) {
+        createdNames.push_back(creation.name);
+    }
+    EXPECT_EQ(createdNames.size(), NumSessions(manifest)) << ::testing::PrintToString(createdNames);
+    std::ranges::sort(createdNames);
+    EXPECT_EQ(std::ranges::adjacent_find(createdNames), createdNames.end()) << ::testing::PrintToString(createdNames);
+}
+
+TEST_F(UnitTestModelBundleInBackground, DoesNotRetryFailedSession)
+{
+    const auto& modelId = m_bundle->GetManifest().modelManifests.begin()->first;
+
+    m_engine.Fail(DecoderSessionName(modelId));
+    for (int i = 0; i < 2; i++) {
+        const auto session = m_bundle->GetInferenceSession(modelId, ModelPartId::DECODER);
+        ASSERT_FALSE(session);
+        EXPECT_EQ(session.error(), make_error_code(Error::general_failure));
+    }
+    EXPECT_EQ(m_engine.GetFailedCreations(), 1);
+}
+
+TEST_F(UnitTestModelBundleInBackground, CancelsQueuedSessionsOnShutdown)
+{
+    const auto smallest = SmallestModelId();
+    const auto largest = LargestModelId();
+
+    // Hold the first creation, of the largest encoder, so the other sessions stay queued
+    m_engine.Block(largest + "/");
+    m_bundle->PreloadSessionsInBackground();
+    ASSERT_TRUE(m_engine.WaitUntilBlocked());
+    auto request =
+        std::async(std::launch::async, [&] { return m_bundle->GetInferenceSession(smallest, ModelPartId::DECODER); });
+
+    // Stopping the pool cancels the queued sessions, which ends the request, then waits for the held creation
+    auto stopping = std::async(std::launch::async, [&] { m_pool.reset(); });
+    const auto session = request.get();
+    m_engine.Release();
+    stopping.get();
+    ASSERT_FALSE(session);
+    EXPECT_EQ(session.error(), make_error_code(Error::operation_cancelled));
+    const auto creations = m_engine.GetCreations();
+    ASSERT_EQ(creations.size(), 1u);
+    EXPECT_TRUE(creations.front().name.starts_with(largest + "/")) << creations.front().name;
 }

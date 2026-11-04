@@ -73,6 +73,8 @@ class RansErrorCategory final : public std::error_category {
             return "invalid stream";
         case error::invalid_state:
             return "invalid state";
+        case error::value_out_of_range:
+            return "value out of range";
         }
         MLVC_ASSERT(false);
         return "unknown error code";
@@ -138,7 +140,7 @@ static std::error_code intializeDistributionDesc(std::vector<DistributionDesc>& 
                                                  const std::span<const int32_t>& pmfOffsets, size_t pmfTableSize)
 {
     auto distributionCount = pmfLengths.size();
-    if (pmfOffsets.size() != distributionCount) {
+    if (distributionCount == 0 || pmfOffsets.size() != distributionCount) {
         return make_error_code(error::invalid_pmf);
     }
     distributionDescs.resize(distributionCount);
@@ -147,11 +149,13 @@ static std::error_code intializeDistributionDesc(std::vector<DistributionDesc>& 
     for (size_t i = 0; i < distributionCount; i++) {
         // last PMF element is tail mass, to be used by bypass symbol
         auto length = pmfLengths[i];
-        if (length <= 1 || pmfTableSize - symbolCursor < static_cast<size_t>(length)) {
+        auto offset = pmfOffsets[i];
+        // The value 0 must be a symbol before the bypass sentinel
+        if (length <= 1 || offset < 0 || offset >= length - 1 || pmfTableSize - symbolCursor < static_cast<size_t>(length)) {
             return make_error_code(error::invalid_pmf);
         }
         auto& desc = distributionDescs[i];
-        desc.m_ValueOffset = pmfOffsets[i];
+        desc.m_ValueOffset = offset;
         desc.m_BypassSentinel = length - 1;
         desc.m_SymbolOffset = symbolCursor;
 
@@ -396,7 +400,8 @@ private:
     // Max bypass value
     freq_t m_bypassMaxValue = 0;
 
-    void encode(RansEncoder& encoder, const std::span<const int32_t>& indices, const std::span<const int32_t>& values) const;
+    std::error_code encode(RansEncoder& encoder, const std::span<const int32_t>& indices,
+                           const std::span<const int32_t>& values) const;
     void encodeBypassValue(RansEncoder& encoder, freq_t bypassValue) const;
 };
 
@@ -455,7 +460,9 @@ std::span<const std::byte> EntropyEncoderImpl<StateType, UnitType>::Encode(IResi
         return {};
     }
     RansEncoder encoder(buffer);
-    encode(encoder, indices, values);
+    if (encode(encoder, indices, values)) {
+        return {};
+    }
     encoder.Flush();
     return encoder.GetSink().EncodedSpan();
 }
@@ -474,19 +481,19 @@ std::error_code EntropyEncoderImpl<StateType, UnitType>::Encode(IRansEncoderStre
     if (!streamImpl) {
         return make_error_code(error::invalid_params);
     }
-    encode(streamImpl->RawStream(), indices, values);
-    return {};
+    return encode(streamImpl->RawStream(), indices, values);
 }
 
 template <typename StateType, typename UnitType>
-void MLVC_RANS_NOSPECTRE EntropyEncoderImpl<StateType, UnitType>::encode(RansEncoder& encoder,
-                                                                         const std::span<const int32_t>& indices,
-                                                                         const std::span<const int32_t>& values) const
+std::error_code MLVC_RANS_NOSPECTRE EntropyEncoderImpl<StateType, UnitType>::encode(
+    RansEncoder& encoder, const std::span<const int32_t>& indices, const std::span<const int32_t>& values) const
 {
     MLVC_ASSERT(m_symbolBits);
 
     auto dataSize = indices.size();
-    MLVC_ASSERT(dataSize == values.size());
+    if (dataSize != values.size()) {
+        return make_error_code(error::invalid_params);
+    }
 
     // Register promotion: copy state to local to break aliasing
     constexpr auto StateBits = RansEncoder::constants::StateBits;
@@ -552,13 +559,14 @@ void MLVC_RANS_NOSPECTRE EntropyEncoderImpl<StateType, UnitType>::encode(RansEnc
 #endif
     };
 
-    // data is encoded in reverse order
+    // data is encoded in reverse order, from one past the end, as a pointer before the start would be UB
     auto* indicesStart = indices.data();
-    auto* indexPtr = indicesStart + dataSize - 1;
-    auto* valuesPtr = values.data() + dataSize - 1;
+    auto* indexPtr = indicesStart + dataSize;
+    auto* valuesPtr = values.data() + dataSize;
 
-    for (; indexPtr >= indicesStart; --indexPtr, --valuesPtr) {
-        auto index = *indexPtr;
+    while (indexPtr != indicesStart) {
+        --valuesPtr;
+        auto index = *--indexPtr;
         if (index < 0) {
             MLVC_ASSERT(!*valuesPtr);
             continue;
@@ -573,27 +581,33 @@ void MLVC_RANS_NOSPECTRE EntropyEncoderImpl<StateType, UnitType>::encode(RansEnc
         }
 
         const auto& distributionDesc = descsData[index];
-        auto value = *valuesPtr + distributionDesc.m_ValueOffset;
-        if (value < 0 || value >= distributionDesc.m_BypassSentinel) {
-            freq_t bypassValue;
-            if (value < 0) {
-                bypassValue = 2 * static_cast<freq_t>(-value) - 1;
+        // In int64_t, as values near the int32_t limits plus the offset overflow int32_t
+        int64_t symbol = static_cast<int64_t>(*valuesPtr) + distributionDesc.m_ValueOffset;
+        if (symbol < 0 || symbol >= distributionDesc.m_BypassSentinel) {
+            uint64_t bypassValue;
+            if (symbol < 0) {
+                if (*valuesPtr < kMinValue) [[unlikely]] {
+                    encoder.MutableState() = static_cast<state_t>(x);
+                    return make_error_code(error::value_out_of_range);
+                }
+                bypassValue = 2 * static_cast<uint64_t>(-symbol) - 1;
             } else {
-                bypassValue = 2 * static_cast<freq_t>(value - distributionDesc.m_BypassSentinel);
+                bypassValue = 2 * static_cast<uint64_t>(symbol - distributionDesc.m_BypassSentinel);
             }
+            MLVC_ASSERT(bypassValue <= std::numeric_limits<freq_t>::max());
             // Write local state back for bypass (uses encoder.Put directly)
             encoder.MutableState() = static_cast<state_t>(x);
-            encodeBypassValue(encoder, bypassValue);
+            encodeBypassValue(encoder, static_cast<freq_t>(bypassValue));
             x = static_cast<enc_t>(encoder.MutableState());
 
-            value = distributionDesc.m_BypassSentinel;
+            symbol = distributionDesc.m_BypassSentinel;
         }
 
-        auto symbol = distributionDesc.m_SymbolOffset + static_cast<freq_t>(value);
-        x = putSymLocal(x, symbolsData[symbol]);
+        x = putSymLocal(x, symbolsData[distributionDesc.m_SymbolOffset + static_cast<size_t>(symbol)]);
     }
 
     encoder.MutableState() = static_cast<state_t>(x);
+    return {};
 }
 
 template <typename StateType, typename UnitType>
@@ -743,6 +757,8 @@ void* RansDecoderStreamImpl<StateType, UnitType>::QueryDowncast(const void* tag)
 template <typename StateType, typename UnitType>
 std::error_code RansDecoderStreamImpl<StateType, UnitType>::Open(const std::span<const std::byte>& data)
 {
+    // Don't stay open on the previous data if the new data is invalid
+    Close();
     if (data.size() % sizeof(unit_t)) {
         return make_error_code(error::invalid_stream);
     }
@@ -987,7 +1003,7 @@ std::error_code MLVC_RANS_NOSPECTRE EntropyDecoderImpl<StateType, UnitType>::dec
             continue;
         }
 
-        MLVC_ASSERT(index < descsCount);
+        // Indices derive from decoded data (scales): clamp rather than assert
         index = std::min(index, descsCount - 1);
 
         // Zero fast-path: ~99% of symbols are zero
@@ -1016,7 +1032,7 @@ std::error_code MLVC_RANS_NOSPECTRE EntropyDecoderImpl<StateType, UnitType>::dec
                 goto stream_error;
             }
 
-            auto symbol = static_cast<int32_t>(startPtr - basePtr);
+            int64_t symbol = startPtr - basePtr;
             if (symbol == desc.m_BypassSentinel) [[unlikely]] {
                 // Write locals back for bypass (uses decoder directly)
                 decoder.MutableState() = x;
@@ -1032,12 +1048,15 @@ std::error_code MLVC_RANS_NOSPECTRE EntropyDecoderImpl<StateType, UnitType>::dec
                 ptr = decoder.GetSource().MutableDecodePtr();
 
                 if (bypassValue & 1) {
-                    symbol = -static_cast<int32_t>(bypassValue >> 1) - 1;
+                    symbol = -static_cast<int64_t>(bypassValue >> 1) - 1;
                 } else {
-                    symbol = static_cast<int32_t>(bypassValue >> 1) + desc.m_BypassSentinel;
+                    symbol = static_cast<int64_t>(bypassValue >> 1) + desc.m_BypassSentinel;
+                }
+                if (symbol - desc.m_ValueOffset < kMinValue || symbol - desc.m_ValueOffset > kMaxValue) [[unlikely]] {
+                    goto stream_error;
                 }
             }
-            values[i] = symbol - desc.m_ValueOffset;
+            values[i] = static_cast<int32_t>(symbol - desc.m_ValueOffset);
         }
     }
 
@@ -1070,6 +1089,10 @@ bool EntropyDecoderImpl<StateType, UnitType>::decodeBypassValue(RansDecoder& dec
         if (bypassCount > sizeof(freq_t) * CHAR_BIT) {
             return false;
         }
+    }
+    // More parts than the encoder writes would shift by the width of freq_t or more
+    if (bypassCount > (sizeof(freq_t) * CHAR_BIT + m_bypassBits - 1) / m_bypassBits) {
+        return false;
     }
 
     // Step 2 : Read bypass value.

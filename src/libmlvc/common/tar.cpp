@@ -146,14 +146,14 @@ expected<std::vector<std::byte>> ReadTarEntry(const std::filesystem::path& archi
 
     std::ifstream file(archivePath, std::ios::binary);
     if (!file) {
-        MLVC_LOG_ERROR("Failed to open tar archive: %s", archivePath.filename().string().c_str());
+        MLVC_LOG_ERROR("Failed to open tar archive: %s", ToLogString(archivePath.filename()).c_str());
         return make_error_code(Error::io_error);
     }
 
     std::error_code ec;
     const auto archiveSize = std::filesystem::file_size(archivePath, ec);
     if (ec) {
-        MLVC_LOG_ERROR("Failed to get size of tar archive %s: %s", archivePath.filename().string().c_str(),
+        MLVC_LOG_ERROR("Failed to get size of tar archive %s: %s", ToLogString(archivePath.filename()).c_str(),
                        ec.message().c_str());
         return make_error_code(Error::io_error);
     }
@@ -204,7 +204,7 @@ expected<std::vector<std::byte>> ReadTarEntry(const std::filesystem::path& archi
     }
 
     MLVC_LOG_ERROR("%.*s not found in tar archive %s", static_cast<int>(entryName.size()), entryName.data(),
-                   archivePath.filename().string().c_str());
+                   ToLogString(archivePath.filename()).c_str());
     return make_error_code(Error::io_error);
 }
 

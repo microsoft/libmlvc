@@ -503,6 +503,7 @@ constexpr SupportedNpu SUPPORTED_NPUS[] = {
     { VENDOR_APPLE, CPU_SERIES_M3 },
     { VENDOR_APPLE, CPU_SERIES_M4 },
     { VENDOR_APPLE, CPU_SERIES_M5 },
+    { VENDOR_APPLE, CPU_SERIES_A18 },  // MacBook Neo (A18 Pro)
     // Intel
     { VENDOR_INTEL, CPU_SERIES_LUNAR_LAKE },
     { VENDOR_INTEL, CPU_SERIES_PANTHER_LAKE },
@@ -691,7 +692,7 @@ bool IsPlatformSupported()
             return false;
         }
 #endif
-        MLVC_LOG_DEBUG("Platform is supported for MLVC");
+        MLVC_LOG_TRACE("Platform is supported for MLVC");
         return true;
     }();
     return supported;
